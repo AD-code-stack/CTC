@@ -1,0 +1,35 @@
+project:
+  name: sign_translation_pc_train
+  seed: 42
+  work_dir: experiments
+
+data:
+  raw_dir: data/raw
+  processed_dir: data/processed
+  label_file: data/processed/labels.json
+  sequence_length: 32
+  feature_dim: 84
+  train_ratio: 0.7
+  val_ratio: 0.2
+  test_ratio: 0.1
+
+model:
+  name: tcn_bilstm
+  num_classes: 10
+  hidden_size: 128
+  tcn_channels: [64, 128]
+  lstm_layers: 1
+  dropout: 0.2
+
+train:
+  batch_size: 32
+  epochs: 50
+  lr: 0.001
+  weight_decay: 0.0001
+  num_workers: 4
+  device: cuda
+  log_interval: 10
+
+deploy:
+  export_format: onnx
+  export_dir: exports
