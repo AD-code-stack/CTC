@@ -135,6 +135,16 @@ python scripts/train.py
 
 这一步可以用来验证“数据 -> 模型”是否对齐。
 
+### 4. 环境要求
+
+当前关键点提取依赖 `MediaPipe Hands`，建议使用兼容版本：
+
+```bash
+pip install --force-reinstall mediapipe==0.10.14
+```
+
+如果当前环境中的 `mediapipe` 不带 `solutions` 接口，`prepare_data.py` 会直接报出明确错误，提示你重新安装兼容版本。
+
 ## 当前是否能跑通
 
 ### 能跑通的部分

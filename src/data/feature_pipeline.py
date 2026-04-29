@@ -6,10 +6,31 @@ from pathlib import Path
 from typing import Any
 
 import cv2
-import mediapipe as mp
 import numpy as np
 from tqdm import tqdm
 
+try:
+    import mediapipe as mp
+except ModuleNotFoundError as exc:  # pragma: no cover - import-time environment issue
+    mp = None
+    mp_solutions = None
+    _MEDIAPIPE_IMPORT_ERROR = exc
+else:
+    _MEDIAPIPE_IMPORT_ERROR = None
+    mp_solutions = getattr(mp, 'solutions', None)
+    if mp_solutions is None:
+        try:
+            from mediapipe.python import solutions as mp_solutions  # type: ignore
+        except Exception:
+            mp_solutions = None
+
+if mp_solutions is None:
+    _MEDIAPIPE_SOLUTIONS_ERROR = (
+        'MediaPipe is installed but the hands solutions API is unavailable. '
+        'Please reinstall a compatible build, for example: pip install --force-reinstall mediapipe==0.10.14'
+    )
+else:
+    _MEDIAPIPE_SOLUTIONS_ERROR = None
 from src.utils.io import save_json
 
 
@@ -121,6 +142,9 @@ def extract_keypoint_features(video_path: str | Path, max_frames: int = 32) -> n
     and each keypoint stores normalized x/y coordinates, so the final
     feature dimension is 84.
     """
+    if mp_solutions is None:
+        raise ImportError(_MEDIAPIPE_SOLUTIONS_ERROR or 'MediaPipe solutions API is unavailable')
+
     video_path = Path(video_path)
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -130,7 +154,7 @@ def extract_keypoint_features(video_path: str | Path, max_frames: int = 32) -> n
     indices = _uniform_frame_indices(total_frames, max_frames)
     sampled_features: list[np.ndarray] = []
 
-    with mp.solutions.hands.Hands(
+    with mp_solutions.hands.Hands(
         static_image_mode=True,
         max_num_hands=2,
         model_complexity=1,
