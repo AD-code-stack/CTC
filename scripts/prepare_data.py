@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
+
+base = Path(__file__).resolve().parents[1]
+if str(base) not in sys.path:
+    sys.path.insert(0, str(base))
 
 from src.data.feature_pipeline import build_processed_dataset
 from src.utils.io import load_yaml
