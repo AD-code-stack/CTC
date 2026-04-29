@@ -7,12 +7,13 @@ data:
   raw_dir: data/raw/CE-CSL
   processed_dir: data/processed
   label_file: data/processed/labels.json
-  processed_records: data/processed/ce_csl_records.json
+  processed_records: data/processed/ce_csl_manifest.json
   sequence_length: 32
   feature_dim: 84
   train_ratio: 0.7
   val_ratio: 0.2
   test_ratio: 0.1
+  feature_type: mediapipe_hand_keypoints
 
 model:
   name: tcn_bilstm
@@ -21,6 +22,7 @@ model:
   tcn_channels: [64, 128]
   lstm_layers: 1
   dropout: 0.2
+  input_dim: 84
 
 train:
   batch_size: 32

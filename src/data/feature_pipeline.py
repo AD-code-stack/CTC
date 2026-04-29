@@ -6,7 +6,9 @@ from pathlib import Path
 from typing import Any
 
 import cv2
+import mediapipe as mp
 import numpy as np
+from tqdm import tqdm
 
 from src.utils.io import save_json
 
@@ -32,6 +34,10 @@ FEATURE_COLUMNS = [
     'Gloss',
     'Note',
 ]
+
+
+_HAND_LANDMARK_COUNT = 21
+_HAND_FEATURE_DIM = _HAND_LANDMARK_COUNT * 2 * 2  # left hand + right hand, each with x/y
 
 
 def load_split_rows(raw_root: str | Path) -> dict[str, list[dict[str, str]]]:
@@ -75,49 +81,83 @@ def _center_crop(frame: np.ndarray, target_ratio: float = 1.0) -> np.ndarray:
     return frame[start:start + new_height, :]
 
 
-def extract_basic_video_features(video_path: str | Path, max_frames: int = 32, feature_dim: int = 84) -> np.ndarray:
-    """Extract lightweight per-frame features from a video.
+def _uniform_frame_indices(num_frames: int, target_length: int) -> np.ndarray:
+    if num_frames <= 0:
+        return np.zeros(target_length, dtype=np.int64)
+    if num_frames == 1:
+        return np.zeros(target_length, dtype=np.int64)
+    return np.linspace(0, num_frames - 1, target_length).round().astype(np.int64)
 
-    The feature vector includes:
-    - resized grayscale appearance features
-    - frame-to-frame motion magnitude summary
 
-    This keeps the pipeline self-contained and avoids requiring a specific
-    landmark model during preprocessing.
+def _hand_landmarks_to_vector(
+    results: Any,
+    image_width: int,
+    image_height: int,
+) -> np.ndarray:
+    left_hand = np.zeros((_HAND_LANDMARK_COUNT, 2), dtype=np.float32)
+    right_hand = np.zeros((_HAND_LANDMARK_COUNT, 2), dtype=np.float32)
+
+    if not results.multi_hand_landmarks:
+        return np.concatenate([left_hand.reshape(-1), right_hand.reshape(-1)], axis=0)
+
+    handedness_list = results.multi_handedness or []
+    for idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
+        label = ''
+        if idx < len(handedness_list) and handedness_list[idx].classification:
+            label = handedness_list[idx].classification[0].label.lower()
+
+        target = right_hand if label == 'right' else left_hand
+        for lm_idx, landmark in enumerate(hand_landmarks.landmark[:_HAND_LANDMARK_COUNT]):
+            target[lm_idx, 0] = float(landmark.x)
+            target[lm_idx, 1] = float(landmark.y)
+
+    return np.concatenate([left_hand.reshape(-1), right_hand.reshape(-1)], axis=0)
+
+
+def extract_keypoint_features(video_path: str | Path, max_frames: int = 32) -> np.ndarray:
+    """Extract MediaPipe hand keypoint sequences from a video.
+
+    Each frame is represented by 42 keypoints (left hand + right hand),
+    and each keypoint stores normalized x/y coordinates, so the final
+    feature dimension is 84.
     """
     video_path = Path(video_path)
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise RuntimeError(f'Cannot open video: {video_path}')
 
-    frames: list[np.ndarray] = []
-    prev_gray: np.ndarray | None = None
-    while len(frames) < max_frames:
-        ok, frame = cap.read()
-        if not ok:
-            break
-        frame = _center_crop(frame, target_ratio=1.0)
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        resized = cv2.resize(gray, (int(np.sqrt(feature_dim)), int(np.sqrt(feature_dim))), interpolation=cv2.INTER_AREA)
-        flat = resized.astype(np.float32).reshape(-1) / 255.0
-        if flat.size < feature_dim:
-            flat = np.pad(flat, (0, feature_dim - flat.size))
-        else:
-            flat = flat[:feature_dim]
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    indices = _uniform_frame_indices(total_frames, max_frames)
+    sampled_features: list[np.ndarray] = []
 
-        motion = 0.0 if prev_gray is None else float(np.mean(cv2.absdiff(gray, prev_gray)) / 255.0)
-        feature = np.concatenate([flat[:-1], np.array([motion], dtype=np.float32)])
-        frames.append(feature.astype(np.float32))
-        prev_gray = gray
+    with mp.solutions.hands.Hands(
+        static_image_mode=True,
+        max_num_hands=2,
+        model_complexity=1,
+        min_detection_confidence=0.5,
+    ) as hands:
+        for frame_idx in indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_idx))
+            ok, frame = cap.read()
+            if not ok:
+                sampled_features.append(np.zeros(_HAND_FEATURE_DIM, dtype=np.float32))
+                continue
+
+            frame = _center_crop(frame, target_ratio=1.0)
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            height, width = rgb.shape[:2]
+            results = hands.process(rgb)
+            feature = _hand_landmarks_to_vector(results, width, height)
+            sampled_features.append(feature.astype(np.float32))
 
     cap.release()
 
-    if not frames:
-        return np.zeros((max_frames, feature_dim), dtype=np.float32)
+    if not sampled_features:
+        return np.zeros((max_frames, _HAND_FEATURE_DIM), dtype=np.float32)
 
-    seq = np.stack(frames, axis=0)
+    seq = np.stack(sampled_features, axis=0)
     if seq.shape[0] < max_frames:
-        pad = np.zeros((max_frames - seq.shape[0], feature_dim), dtype=np.float32)
+        pad = np.zeros((max_frames - seq.shape[0], _HAND_FEATURE_DIM), dtype=np.float32)
         seq = np.concatenate([seq, pad], axis=0)
     elif seq.shape[0] > max_frames:
         seq = seq[:max_frames]
@@ -149,7 +189,7 @@ def build_processed_dataset(
     for split, rows in split_rows.items():
         split_feature_dir = feature_root / split
         split_feature_dir.mkdir(parents=True, exist_ok=True)
-        for row in rows:
+        for row in tqdm(rows, desc=f'Processing {split}', leave=False):
             number = (row.get('Number') or '').strip()
             translator = (row.get('Translator') or '').strip()
             chinese_sentence = (row.get('Chinese Sentences') or '').strip()
@@ -161,7 +201,12 @@ def build_processed_dataset(
                 continue
 
             feature_path = split_feature_dir / f'{number}.npy'
-            features = extract_basic_video_features(video_path, max_frames=sequence_length, feature_dim=feature_dim)
+            features = extract_keypoint_features(video_path, max_frames=sequence_length)
+            if features.shape[1] != feature_dim:
+                raise ValueError(
+                    f'Feature dimension mismatch for {video_path}: '
+                    f'expected {feature_dim}, got {features.shape[1]}'
+                )
             np.save(feature_path, features)
 
             items.append(
@@ -189,6 +234,7 @@ def build_processed_dataset(
             'feature_dir': str(feature_root),
             'sequence_length': sequence_length,
             'feature_dim': feature_dim,
+            'feature_type': 'mediapipe_hand_keypoints',
             'missing_videos': missing_videos,
         },
     )

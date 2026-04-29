@@ -24,7 +24,7 @@ def main() -> None:
         print(f'Processed manifest not found: {manifest_path}')
 
     model = TCNBiLSTM(
-        input_dim=config['data']['feature_dim'],
+        input_dim=config['model'].get('input_dim', config['data']['feature_dim']),
         num_classes=config['model']['num_classes'],
         hidden_size=config['model']['hidden_size'],
         lstm_layers=config['model']['lstm_layers'],
