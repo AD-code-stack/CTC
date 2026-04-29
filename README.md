@@ -28,6 +28,45 @@ Project/
 3. 数据集到位后替换 `data/raw/` 并重新处理
 4. 固化导出格式，优先 ONNX
 
+## CE-CSL 数据处理流程
+
+当前项目采用“原始视频 → 特征文件 → 训练数据”的方式，不直接端到端读视频训练。
+
+### 原始数据放置
+
+将 CE-CSL 数据集放入：
+
+```text
+data/raw/CE-CSL/
+├── label/
+│   ├── train.csv
+│   ├── dev.csv
+│   └── test.csv
+└── video/
+    ├── train/
+    ├── dev/
+    └── test/
+```
+
+每个 split 下再按 `Translator` 分成 `A` 到 `L` 子目录，视频文件放在对应目录内。
+
+### 处理后输出
+
+运行数据准备脚本后，会生成：
+
+- `data/processed/features/train/`
+- `data/processed/features/dev/`
+- `data/processed/features/test/`
+- `data/processed/train.json`
+- `data/processed/dev.json`
+- `data/processed/test.json`
+- `data/processed/ce_csl_manifest.json`
+- `data/processed/ce_csl_summary.json`
+
+### 数据划分说明
+
+CE-CSL 已经按照 `train`、`dev`、`test` 三部分划分好了，脚本不会重新随机切分，而是严格沿用原始划分。
+
 ## 快速开始
 
 ### 1. 安装依赖
@@ -36,22 +75,13 @@ Project/
 pip install -r requirements.txt
 ```
 
-### 2. 创建数据目录
-
-仓库已预留以下目录：
-
-- `data/raw/`
-- `data/processed/`
-- `experiments/`
-- `exports/`
-
-### 3. 运行数据准备骨架
+### 2. 运行数据准备脚本
 
 ```bash
 python scripts/prepare_data.py
 ```
 
-### 4. 运行训练骨架
+### 3. 运行训练骨架
 
 ```bash
 python scripts/train.py
