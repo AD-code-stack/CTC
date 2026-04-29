@@ -4,9 +4,10 @@ project:
   work_dir: experiments
 
 data:
-  raw_dir: data/raw
+  raw_dir: data/raw/CE-CSL
   processed_dir: data/processed
   label_file: data/processed/labels.json
+  processed_records: data/processed/ce_csl_records.json
   sequence_length: 32
   feature_dim: 84
   train_ratio: 0.7

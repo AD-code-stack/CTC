@@ -13,6 +13,12 @@ def load_yaml(path: str | Path) -> dict[str, Any]:
         return yaml.safe_load(f)
 
 
+def load_json(path: str | Path) -> Any:
+    path = Path(path)
+    with path.open('r', encoding='utf-8') as f:
+        return json.load(f)
+
+
 def save_json(path: str | Path, data: Any) -> None:
     # 统一保存 JSON 结果，例如标签映射、评估指标、实验记录等
     path = Path(path)
