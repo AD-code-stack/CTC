@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -20,16 +20,16 @@ class CECSLRecord:
     feature_path: str | None
 
 
-CSV_COLUMNS = [
-    'Number',
-    'Translator',
-    'Chinese Sentences',
-    'Gloss',
-    'Note',
-]
+@dataclass(slots=True)
+class CECSLFeatureConfig:
+    # 输出每个视频统一采样到的帧数
+    sequence_length: int = 32
+    # 每帧特征维度：468x2 face + 21x2 left hand + 21x2 right hand + 33x2 pose = 1048? 
+    # 这里保存为关键点展开后的向量，维度由实际检测结果决定，预留给训练端自适应读取
+    feature_dim: int = 0
 
 
-def _normalize_note(value: str | None) -> str:
+def _normalize_text(value: str | None) -> str:
     return (value or '').strip()
 
 
@@ -46,11 +46,11 @@ def load_records(raw_root: str | Path) -> list[CECSLRecord]:
         with csv_path.open('r', encoding='utf-8-sig', newline='') as f:
             reader = csv.DictReader(f)
             for row in reader:
-                number = (row.get('Number') or '').strip()
-                translator = (row.get('Translator') or '').strip()
-                chinese_sentence = (row.get('Chinese Sentences') or '').strip()
-                gloss = (row.get('Gloss') or '').strip()
-                note = _normalize_note(row.get('Note'))
+                number = _normalize_text(row.get('Number'))
+                translator = _normalize_text(row.get('Translator'))
+                chinese_sentence = _normalize_text(row.get('Chinese Sentences'))
+                gloss = _normalize_text(row.get('Gloss'))
+                note = _normalize_text(row.get('Note'))
                 video_path = _resolve_video_path(video_split_dir, translator, number)
                 records.append(
                     CECSLRecord(
@@ -75,12 +75,11 @@ def _resolve_video_path(split_dir: Path, translator: str, number: str) -> Path |
     if not translator_dir.exists():
         return None
 
-    candidates = sorted(translator_dir.glob(f'{number}.*'))
-    if candidates:
-        return candidates[0]
-
-    nested_candidates = sorted(translator_dir.glob(f'**/{number}.*'))
-    return nested_candidates[0] if nested_candidates else None
+    for pattern in (f'{number}.*', f'**/{number}.*'):
+        candidates = sorted(translator_dir.glob(pattern))
+        if candidates:
+            return candidates[0]
+    return None
 
 
 def build_index(records: list[CECSLRecord]) -> dict[str, Any]:
@@ -95,5 +94,8 @@ def build_index(records: list[CECSLRecord]) -> dict[str, Any]:
 
 
 def save_records(path: str | Path, records: list[CECSLRecord]) -> None:
-    payload = [record.__dict__ for record in records]
-    save_json(path, payload)
+    save_json(path, [asdict(record) for record in records])
+
+
+def to_dicts(records: list[CECSLRecord]) -> list[dict[str, Any]]:
+    return [asdict(record) for record in records]
