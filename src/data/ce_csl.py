@@ -15,6 +15,7 @@ class CECSLRecord:
     translator: str
     chinese_sentence: str
     gloss: str
+    gloss_tokens: list[str]
     note: str
     video_path: str | None
     feature_path: str | None
@@ -31,6 +32,10 @@ class CECSLFeatureConfig:
 
 def _normalize_text(value: str | None) -> str:
     return (value or '').strip()
+
+
+def _split_gloss(gloss: str) -> list[str]:
+    return [token.strip() for token in gloss.split('/') if token.strip()]
 
 
 def load_records(raw_root: str | Path) -> list[CECSLRecord]:
@@ -59,6 +64,7 @@ def load_records(raw_root: str | Path) -> list[CECSLRecord]:
                         translator=translator,
                         chinese_sentence=chinese_sentence,
                         gloss=gloss,
+                        gloss_tokens=_split_gloss(gloss),
                         note=note,
                         video_path=str(video_path) if video_path else None,
                         feature_path=None,

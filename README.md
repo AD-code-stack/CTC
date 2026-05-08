@@ -2,7 +2,7 @@
 
 本目录用于在 PC 端先完成数据准备、特征提取、模型训练和导出，后续再把同样的特征形式迁移到开发板实时推理。
 
-当前项目已经从“视频统计特征”切换为“**MediaPipe 手部关键点序列特征**”，训练输入与最终板端实时输入保持一致，便于后续部署。
+当前项目已经从“视频统计特征”切换为“**MediaPipe 手部关键点序列特征**”，并进一步升级为“**连续手语识别准备阶段**”：数据中的 `Gloss` 已按序列 token 化，训练输入与后续连续识别/翻译任务保持一致，便于后续扩展。
 
 ## 当前代码流程
 
@@ -15,9 +15,18 @@
   -> 32 帧序列 x 84 维特征
   -> data/processed/features/*.npy
   -> scripts/train.py
-  -> TCN-BiLSTM
-  -> 导出 ONNX / 部署到开发板
+  -> TCN-BiLSTM 编码器
+  -> 序列输出层 / CTC / decoder（后续升级）
+  -> gloss 序列
+  -> gloss-to-natural-language 转换器
+  -> 自然语言输出
 ```
+
+其中：
+
+- `TCN-BiLSTM` 负责提取时序特征，当前作为基础模型骨干保留
+- `CTC / decoder` 是后续把连续视频转成 `gloss` 序列时常见的序列建模层
+- `gloss-to-natural-language 转换器` 是把 `gloss` 序列转换为更自然句子的后处理模块，可以先用大模型 API，也可以后续训练专门转换器
 
 ## 当前进度
 
@@ -26,13 +35,16 @@
 - 已完成 PC 端数据准备骨架
 - 已完成基于 MediaPipe Hands 的关键点特征提取
 - 已生成并验证首个样本特征文件，格式为 `(32, 84)`
+- 已将 CE-CSL 的 `Gloss` 处理为 `token` 序列，为连续识别做准备
 - 已完成 `TCN-BiLSTM` 模型骨架和配置对齐
 - 已补充 README 中的流程说明和环境要求
 - 已验证 `prepare_data.py` 可在当前环境中开始批量处理视频数据
-- 已补全训练脚本，可直接读取 `manifest` 并开始训练 / 验证 / 测试
+- 已补充连续手语识别准备所需的 `token_map.json` 与 `sequence_prep_summary.json`
+- 已明确后续可以在 `TCN-BiLSTM` 后接 `CTC / decoder`，再接 `gloss-to-natural-language` 转换器
 
 当前仍待完善的部分：
 
+- 真正的序列建模训练目标（如 CTC / Attention / Decoder）
 - 更完整的训练监控（学习率调度、混淆矩阵、Top-K 等）
 - 更稳健的 checkpoint 恢复机制
 - ONNX 导出脚本
@@ -47,7 +59,21 @@ python scripts/prepare_data.py
 python scripts/train.py
 ```
 
-前者负责生成关键点特征与清单，后者负责读取清单完成训练与评估。
+前者负责生成关键点特征与 `Gloss` 序列清单，后者负责完成连续标签准备并导出 `token_map` 与训练摘要。
+
+### 连续识别与自然语言转换链条
+
+当前项目后续的目标链条可以理解为：
+
+```text
+视频 -> 关键点序列 -> TCN-BiLSTM 编码器 -> CTC / decoder -> gloss 序列 -> gloss-to-natural-language 转换器 -> 自然语言
+```
+
+其中自然语言转换器有两种可行路线：
+
+1. **先接大模型 API**：开发快、效果通常更自然，适合前期验证展示效果
+2. **再训练专门转换器**：更可控、可离线部署、成本更低，但需要更多数据和训练工作
+
 
 
 ### 1. 数据准备

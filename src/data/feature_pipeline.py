@@ -41,6 +41,7 @@ class CECSLItem:
     translator: str
     chinese_sentence: str
     gloss: str
+    gloss_tokens: list[str]
     note: str
     video_path: str
     feature_path: str
@@ -195,6 +196,10 @@ def _safe_gloss(gloss: str, translator: str, number: str) -> str:
     return f'{translator}_{number}'
 
 
+def _split_gloss(gloss: str) -> list[str]:
+    return [token.strip() for token in gloss.split('/') if token.strip()]
+
+
 def build_processed_dataset(
     raw_root: str | Path,
     processed_root: str | Path,
@@ -233,13 +238,15 @@ def build_processed_dataset(
                 )
             np.save(feature_path, features)
 
+            safe_gloss = _safe_gloss(gloss, translator, number)
             items.append(
                 CECSLItem(
                     split=split,
                     number=number,
                     translator=translator,
                     chinese_sentence=chinese_sentence,
-                    gloss=_safe_gloss(gloss, translator, number),
+                    gloss=safe_gloss,
+                    gloss_tokens=_split_gloss(safe_gloss),
                     note=note,
                     video_path=str(video_path),
                     feature_path=str(feature_path),
@@ -260,6 +267,7 @@ def build_processed_dataset(
             'feature_dim': feature_dim,
             'feature_type': 'mediapipe_hand_keypoints',
             'missing_videos': missing_videos,
+            'label_type': 'gloss_sequence',
         },
     )
     return items
