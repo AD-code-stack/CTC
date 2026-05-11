@@ -12,21 +12,22 @@
 原始视频
   -> scripts/prepare_data.py
   -> MediaPipe 手部关键点提取
-  -> 32 帧序列 x 84 维特征
+  -> 固定长度关键点序列（当前默认 32 帧 x 84 维）
   -> data/processed/features/*.npy
   -> scripts/train.py
   -> TCN-BiLSTM 编码器
-  -> 序列输出层 / CTC / decoder（后续升级）
+  -> 帧级分类 logits
+  -> CTC loss / greedy decode
   -> gloss 序列
-  -> gloss-to-natural-language 转换器
+  -> gloss-to-natural-language 转换器（后续）
   -> 自然语言输出
 ```
 
 其中：
 
-- `TCN-BiLSTM` 负责提取时序特征，当前作为基础模型骨干保留
-- `CTC / decoder` 是后续把连续视频转成 `gloss` 序列时常见的序列建模层
-- `gloss-to-natural-language 转换器` 是把 `gloss` 序列转换为更自然句子的后处理模块，可以先用大模型 API，也可以后续训练专门转换器
+- `TCN-BiLSTM` 负责提取连续手语视频的时序特征，当前保留为第一版 baseline 主干
+- `CTC` 用于在没有词级时间边界标注的情况下学习“视频帧序列 -> gloss token 序列”的对齐关系
+- `gloss-to-natural-language 转换器` 是后续的第二阶段模块，用于把 `gloss` 序列转换为更自然的中文句子，可以先接规则后处理或大模型 API，再考虑训练专门转换器
 
 ## 当前进度
 
