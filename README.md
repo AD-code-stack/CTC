@@ -45,11 +45,45 @@
 
 当前仍待完善的部分：
 
-- 真正的序列建模训练目标（如 CTC / Attention / Decoder）
-- 更完整的训练监控（学习率调度、混淆矩阵、Top-K 等）
+- 更细粒度的评估分析（如按类别统计、混淆矩阵、Top-K 等）
 - 更稳健的 checkpoint 恢复机制
 - ONNX 导出脚本
 - 开发板端实时推理与部署适配
+
+## 训练过程与日志输出
+
+当前 `scripts/train.py` 已补齐完整的训练主流程，包含：
+
+- 训练集 / 验证集 / 测试集划分
+- 每个 epoch 的训练与验证
+- CTC loss 计算与反向传播
+- 梯度裁剪
+- 验证集指标评估
+- 最优模型与最新模型保存
+- 测试集最终评估
+
+训练过程会额外保存便于后续作图分析的日志文件：
+
+- `experiments/train_history.json`
+- `experiments/train_history.csv`
+- `experiments/final_metrics.json`
+
+其中 `train_history.csv` 适合直接用 Excel、Pandas 或 Matplotlib 绘图，主要记录了：
+
+- `train_loss`
+- `train_token_error_rate`
+- `train_token_accuracy`
+- `train_edit_distance`
+- `val_loss`
+- `val_token_error_rate`
+- `val_token_accuracy`
+- `val_edit_distance`
+
+如果后续需要继续增强训练过程，推荐优先补充：
+
+- 学习率调度器
+- checkpoint 断点续训
+- 更完整的序列级评估脚本
 
 ### 当前全流程
 

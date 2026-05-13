@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import csv
+import json
 import sys
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +19,19 @@ from src.data.dataset import SequenceSample, SignLanguageSequenceDataset, collat
 from src.models.tcn_bilstm import TCNBiLSTM
 from src.utils.io import load_json, load_yaml, save_json
 from src.utils.train_utils import set_seed
+
+
+@dataclass(slots=True)
+class EpochMetrics:
+    epoch: int
+    split: str
+    loss: float
+    token_error_rate: float
+    token_accuracy: float
+    edit_distance: float
+    num_batches: int
+    num_sequences: int
+    num_tokens: int
 
 
 def _load_manifest(manifest_path: Path) -> list[dict[str, Any]]:
@@ -99,13 +115,17 @@ def _decode_to_tokens(seq: list[int], id_to_token: dict[int, str]) -> str:
     return '/'.join(id_to_token.get(idx, f'<unk:{idx}>') for idx in seq)
 
 
+def _safe_ratio(numerator: float, denominator: float) -> float:
+    return numerator / denominator if denominator else 0.0
+
+
 def _run_epoch(
     model: nn.Module,
     loader: torch.utils.data.DataLoader,
     criterion: nn.Module,
     device: torch.device,
     optimizer: torch.optim.Optimizer | None = None,
-) -> tuple[float, float, list[dict[str, str]]]:
+) -> tuple[EpochMetrics, list[dict[str, str]]]:
     is_train = optimizer is not None
     model.train(is_train)
 
@@ -113,6 +133,9 @@ def _run_epoch(
     total_batches = 0
     total_distance = 0
     total_target_tokens = 0
+    total_pred_tokens = 0
+    total_correct_tokens = 0
+    total_sequences = 0
     preview: list[dict[str, str]] = []
 
     for features, _padded_tokens, flat_targets, input_lengths, target_lengths, metas in loader:
@@ -136,24 +159,60 @@ def _run_epoch(
 
         decoded = _greedy_decode(logits.detach().cpu())
         start = 0
-        for i, target_len in enumerate(target_lengths.detach().cpu().tolist()):
-            target_seq = flat_targets[start:start + target_len].detach().cpu().tolist()
+        target_lengths_list = target_lengths.detach().cpu().tolist()
+        for i, target_len in enumerate(target_lengths_list):
+            target_seq = flat_targets[start : start + target_len].detach().cpu().tolist()
             pred_seq = decoded[i]
             total_distance += _edit_distance(pred_seq, target_seq)
-            total_target_tokens += max(len(target_seq), 1)
+            total_target_tokens += len(target_seq)
+            total_pred_tokens += len(pred_seq)
+            total_correct_tokens += sum(1 for a, b in zip(pred_seq, target_seq) if a == b)
+            total_sequences += 1
             if len(preview) < 3:
                 preview.append(
                     {
                         'number': str(metas[i].get('number', 'unknown')),
-                        'target_ids': str(target_seq),
-                        'pred_ids': str(pred_seq),
+                        'target_ids': json.dumps(target_seq, ensure_ascii=False),
+                        'pred_ids': json.dumps(pred_seq, ensure_ascii=False),
                     }
                 )
             start += target_len
 
-    avg_loss = total_loss / max(total_batches, 1)
-    token_error_rate = total_distance / max(total_target_tokens, 1)
-    return avg_loss, token_error_rate, preview
+    metrics = EpochMetrics(
+        epoch=0,
+        split='train' if is_train else 'val',
+        loss=_safe_ratio(total_loss, max(total_batches, 1)),
+        token_error_rate=_safe_ratio(total_distance, max(total_target_tokens, 1)),
+        token_accuracy=_safe_ratio(total_correct_tokens, max(total_target_tokens, 1)),
+        edit_distance=_safe_ratio(total_distance, max(total_sequences, 1)),
+        num_batches=total_batches,
+        num_sequences=total_sequences,
+        num_tokens=total_target_tokens,
+    )
+    return metrics, preview
+
+
+def _write_metrics_csv(path: Path, history: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = list(history[0].keys()) if history else []
+    with path.open('w', encoding='utf-8', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(history)
+
+
+def _save_checkpoint(path: Path, *, epoch: int, model: nn.Module, optimizer: torch.optim.Optimizer, token_map: dict[str, int], config: dict[str, Any], history: list[dict[str, Any]]) -> None:
+    torch.save(
+        {
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'token_map': token_map,
+            'config': config,
+            'history': history,
+        },
+        path,
+    )
 
 
 def main() -> None:
@@ -190,19 +249,37 @@ def main() -> None:
     if len(dataset) < 3:
         raise ValueError('Need at least 3 sequence samples to continue')
 
-    train_size = max(int(len(dataset) * 0.7), 1)
-    val_size = max(int(len(dataset) * 0.2), 1)
-    test_size = len(dataset) - train_size - val_size
-    if test_size <= 0:
+    train_ratio = float(config['data'].get('train_ratio', 0.7))
+    val_ratio = float(config['data'].get('val_ratio', 0.2))
+    test_ratio = float(config['data'].get('test_ratio', 0.1))
+    ratio_sum = train_ratio + val_ratio + test_ratio
+    if ratio_sum <= 0:
+        raise ValueError('Data split ratios must be positive')
+    train_ratio /= ratio_sum
+    val_ratio /= ratio_sum
+    test_ratio /= ratio_sum
+
+    total = len(dataset)
+    train_size = max(int(total * train_ratio), 1)
+    val_size = max(int(total * val_ratio), 1)
+    test_size = total - train_size - val_size
+    if test_size < 1:
         test_size = 1
-        train_size = max(train_size - 1, 1)
-    if train_size + val_size + test_size != len(dataset):
-        val_size = max(len(dataset) - train_size - test_size, 1)
+        if train_size > val_size:
+            train_size -= 1
+        else:
+            val_size -= 1
+    if train_size < 1 or val_size < 1 or test_size < 1:
+        raise ValueError('Not enough samples for train/val/test split')
+    if train_size + val_size + test_size != total:
+        val_size += total - (train_size + val_size + test_size)
+    if train_size + val_size + test_size != total:
+        raise ValueError('Failed to build an exact dataset split')
 
     generator = torch.Generator().manual_seed(config['project']['seed'])
     train_ds, val_ds, test_ds = torch.utils.data.random_split(
         dataset,
-        [train_size, val_size, len(dataset) - train_size - val_size],
+        [train_size, val_size, test_size],
         generator=generator,
     )
     train_loader = torch.utils.data.DataLoader(
@@ -239,7 +316,8 @@ def main() -> None:
             'input_shape': [config['data']['sequence_length'], config['data']['feature_dim']],
             'label_type': 'gloss_sequence',
             'split_sizes': {'train': train_size, 'val': val_size, 'test': test_size},
-            'note': 'Initial CTC training baseline over gloss token sequences.',
+            'split_ratios': {'train': train_ratio, 'val': val_ratio, 'test': test_ratio},
+            'note': 'CTC training baseline over gloss token sequences.',
         },
     )
 
@@ -251,71 +329,91 @@ def main() -> None:
     )
 
     best_val_ter = float('inf')
-    history: list[dict[str, float]] = []
+    history: list[dict[str, Any]] = []
     epochs = int(config['train']['epochs'])
 
     for epoch in range(1, epochs + 1):
-        train_loss, train_ter, train_preview = _run_epoch(model, train_loader, criterion, device, optimizer)
-        val_loss, val_ter, val_preview = _run_epoch(model, val_loader, criterion, device, optimizer=None)
-        history.append(
-            {
-                'epoch': epoch,
-                'train_loss': train_loss,
-                'train_token_error_rate': train_ter,
-                'val_loss': val_loss,
-                'val_token_error_rate': val_ter,
-            }
-        )
+        train_metrics, train_preview = _run_epoch(model, train_loader, criterion, device, optimizer)
+        val_metrics, val_preview = _run_epoch(model, val_loader, criterion, device, optimizer=None)
+        train_metrics.epoch = epoch
+        train_metrics.split = 'train'
+        val_metrics.epoch = epoch
+        val_metrics.split = 'val'
+
+        epoch_record = {
+            'epoch': epoch,
+            'train_loss': train_metrics.loss,
+            'train_token_error_rate': train_metrics.token_error_rate,
+            'train_token_accuracy': train_metrics.token_accuracy,
+            'train_edit_distance': train_metrics.edit_distance,
+            'val_loss': val_metrics.loss,
+            'val_token_error_rate': val_metrics.token_error_rate,
+            'val_token_accuracy': val_metrics.token_accuracy,
+            'val_edit_distance': val_metrics.edit_distance,
+        }
+        history.append(epoch_record)
+
         print(
             f'Epoch {epoch:03d} | '
-            f'train_loss={train_loss:.4f} train_TER={train_ter:.4f} | '
-            f'val_loss={val_loss:.4f} val_TER={val_ter:.4f}'
+            f'train_loss={train_metrics.loss:.4f} train_TER={train_metrics.token_error_rate:.4f} '
+            f'train_ACC={train_metrics.token_accuracy:.4f} | '
+            f'val_loss={val_metrics.loss:.4f} val_TER={val_metrics.token_error_rate:.4f} '
+            f'val_ACC={val_metrics.token_accuracy:.4f}'
         )
+
         if val_preview:
             preview = val_preview[0]
-            target_ids = eval(preview['target_ids'])
-            pred_ids = eval(preview['pred_ids'])
+            target_ids = json.loads(preview['target_ids'])
+            pred_ids = json.loads(preview['pred_ids'])
             print('  sample:', preview['number'])
             print('  target:', _decode_to_tokens(target_ids, id_to_token))
             print('  pred  :', _decode_to_tokens(pred_ids, id_to_token))
 
-        latest_ckpt = work_dir / 'latest.pt'
-        torch.save(
-            {
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'token_map': token_map,
-                'config': config,
-                'history': history,
-            },
-            latest_ckpt,
+        _save_checkpoint(
+            work_dir / 'latest.pt',
+            epoch=epoch,
+            model=model,
+            optimizer=optimizer,
+            token_map=token_map,
+            config=config,
+            history=history,
         )
-        if val_ter < best_val_ter:
-            best_val_ter = val_ter
-            torch.save(
-                {
-                    'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'token_map': token_map,
-                    'config': config,
-                    'history': history,
-                },
+        if val_metrics.token_error_rate < best_val_ter:
+            best_val_ter = val_metrics.token_error_rate
+            _save_checkpoint(
                 work_dir / 'best.pt',
+                epoch=epoch,
+                model=model,
+                optimizer=optimizer,
+                token_map=token_map,
+                config=config,
+                history=history,
             )
 
-    test_loss, test_ter, test_preview = _run_epoch(model, test_loader, criterion, device, optimizer=None)
-    print(f'Test | loss={test_loss:.4f} token_error_rate={test_ter:.4f}')
+    test_metrics, test_preview = _run_epoch(model, test_loader, criterion, device, optimizer=None)
+    print(
+        f'Test | loss={test_metrics.loss:.4f} token_error_rate={test_metrics.token_error_rate:.4f} '
+        f'token_accuracy={test_metrics.token_accuracy:.4f}'
+    )
     if test_preview:
         preview = test_preview[0]
-        target_ids = eval(preview['target_ids'])
-        pred_ids = eval(preview['pred_ids'])
+        target_ids = json.loads(preview['target_ids'])
+        pred_ids = json.loads(preview['pred_ids'])
         print('  test sample:', preview['number'])
         print('  target:', _decode_to_tokens(target_ids, id_to_token))
         print('  pred  :', _decode_to_tokens(pred_ids, id_to_token))
 
     save_json(work_dir / 'train_history.json', history)
+    _write_metrics_csv(work_dir / 'train_history.csv', history)
+    save_json(
+        work_dir / 'final_metrics.json',
+        {
+            'history': history,
+            'test': asdict(test_metrics),
+            'best_val_token_error_rate': best_val_ter,
+            'num_epochs': epochs,
+        },
+    )
     print(f'Artifacts saved to: {work_dir}')
 
 
