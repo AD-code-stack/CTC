@@ -239,8 +239,8 @@ def build_processed_dataset(
                 )
             np.save(feature_path, features)
 
-            # 使用相对于 processed_root 的相对路径，便于跨平台使用
-            relative_feature_path = f'features/{split}/{feature_filename}'
+            # 使用相对于项目根目录的相对路径，便于跨平台使用
+            relative_feature_path = f'data/processed/features/{split}/{feature_filename}'
 
             safe_gloss = _safe_gloss(gloss, translator, number)
             items.append(
