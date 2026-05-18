@@ -454,7 +454,7 @@ def main() -> None:
 
     # 测试最佳模型
     if (work_dir / 'best.pt').exists():
-        best_checkpoint = torch.load(work_dir / 'best.pt')
+        best_checkpoint = torch.load(work_dir / 'best.pt', weights_only=False)
         model.load_state_dict(best_checkpoint['model_state_dict'])
         print(f'加载第 {best_checkpoint["epoch"]} 轮最佳模型\n')
 
