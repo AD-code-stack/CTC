@@ -425,8 +425,8 @@ def main() -> None:
                 print(f'        pred:{_decode_to_tokens(pred_ids, id_to_token)}')
 
         _save_checkpoint(work_dir / 'latest.pt',
-            epoch=epoch, model=model, optimizer=optimizer, token_map=token_map,
-            config=config, history=history, best_metric=best_val_ter
+            epoch=epoch, model_state_dict=model.state_dict(), optimizer_state_dict=optimizer.state_dict(),
+            token_map=token_map, config=config, history=history, best_metric=best_val_ter
         )
         
         if val_metrics.token_error_rate < best_val_ter:
@@ -434,8 +434,8 @@ def main() -> None:
             patience_counter = 0
             print(f'  *** NEW BEST val_TER={best_val_ter:.4f} ***')
             _save_checkpoint(work_dir / 'best.pt',
-                epoch=epoch, model=model, optimizer=optimizer, token_map=token_map,
-                config=config, history=history, best_metric=best_val_ter
+                epoch=epoch, model_state_dict=model.state_dict(), optimizer_state_dict=optimizer.state_dict(),
+                token_map=token_map, config=config, history=history, best_metric=best_val_ter
             )
         else:
             patience_counter += 1
