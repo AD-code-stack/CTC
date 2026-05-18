@@ -4,6 +4,7 @@ import csv
 import json
 import math
 import sys
+from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -44,25 +45,57 @@ def _load_manifest(manifest_path: Path) -> list[dict[str, Any]]:
     return data
 
 
-def _build_sequence_samples(manifest: list[dict[str, Any]], base_dir: Path) -> tuple[list[SequenceSample], dict[str, int]]:
-    token_names: list[str] = []
+def _build_sequence_samples_with_vocab_filtering(
+    manifest: list[dict[str, Any]], 
+    base_dir: Path,
+    min_token_freq: int = 2  # 最小词频阈值
+) -> tuple[list[SequenceSample], dict[str, int], Counter]:
+    """构建样本，同时过滤低频词汇"""
+    
+    # 统计所有token出现频率
+    token_counter = Counter()
     for item in manifest:
         tokens = item.get('gloss_tokens') or []
-        token_names.extend(str(token).strip() for token in tokens if str(token).strip())
-
-    token_map = {token: idx + 1 for idx, token in enumerate(sorted(set(token_names)))}
-
+        token_counter.update(str(token).strip() for token in tokens if str(token).strip())
+    
+    # 过滤低频token，建立映射
+    valid_tokens = {token for token, count in token_counter.items() if count >= min_token_freq}
+    special_tokens = ['<blank>', '<unk>']  # blank用于CTC, unk用于低频词
+    all_tokens = special_tokens + sorted(valid_tokens)
+    
+    # 创建token到ID的映射
+    token_map = {token: idx for idx, token in enumerate(all_tokens)}
+    unk_id = token_map['<unk>']
+    
+    print(f'原始词汇量: {len(token_counter)}')
+    print(f'过滤后词汇量 (freq >= {min_token_freq}): {len(valid_tokens)}')
+    print(f'低频词被映射到<unk>: {len(token_counter) - len(valid_tokens)}')
+    
     samples: list[SequenceSample] = []
+    skipped_low_freq = 0
+    skipped_empty = 0
+    
     for item in manifest:
         feature_path_str = item.get('feature_path')
-        tokens = [str(token).strip() for token in (item.get('gloss_tokens') or []) if str(token).strip()]
-        if not feature_path_str or not tokens:
+        raw_tokens = [str(token).strip() for token in (item.get('gloss_tokens') or [])]
+        raw_tokens = [t for t in raw_tokens if t]
+        
+        if not feature_path_str or not raw_tokens:
+            skipped_empty += 1
             continue
-        # 拼接项目根目录，使用相对路径
+        
+        # 将低频词替换为<unk>
+        token_ids = [token_map.get(t, unk_id) for t in raw_tokens]
+        
+        # 检查有效token比例（至少保留50%）
+        original_count = len(raw_tokens)
+        valid_count = sum(1 for t, tid in zip(raw_tokens, token_ids) 
+                         if t in valid_tokens or tid == unk_id)
+        
+        if valid_count < original_count * 0.5 and original_count > 3:
+            skipped_low_freq += 1
+        
         feature_path = base_dir / feature_path_str
-        token_ids = [token_map[token] for token in tokens if token in token_map]
-        if not token_ids:
-            continue
         samples.append(
             SequenceSample(
                 feature_path=Path(feature_path),
@@ -72,15 +105,20 @@ def _build_sequence_samples(manifest: list[dict[str, Any]], base_dir: Path) -> t
                     'number': item.get('number'),
                     'translator': item.get('translator'),
                     'gloss': item.get('gloss'),
-                    'gloss_tokens': tokens,
+                    'gloss_tokens': raw_tokens,
                 },
             )
         )
-    return samples, token_map
+    
+    print(f'跳过空样本: {skipped_empty}')
+    print(f'高频低有效token样本: {skipped_low_freq}')
+    print(f'最终样本数: {len(samples)}')
+    
+    return samples, token_map, token_counter
 
 
 def _greedy_decode(logits: torch.Tensor, blank_id: int = 0) -> list[list[int]]:
-    """贪婪解码：选择每个时间步概率最高的类别"""
+    """贪婪解码"""
     pred_ids = logits.argmax(dim=-1)
     sequences: list[list[int]] = []
     for seq in pred_ids:
@@ -97,62 +135,6 @@ def _greedy_decode(logits: torch.Tensor, blank_id: int = 0) -> list[list[int]]:
     return sequences
 
 
-def _beam_search_decode(log_probs: torch.Tensor, blank_id: int = 0, beam_width: int = 5) -> list[list[int]]:
-    """束搜索解码：考虑多个候选路径，更好的CTC解码"""
-    T, B, C = log_probs.shape  # 时间步, 批次, 类别数
-    
-    batch_sequences = []
-    for b in range(B):
-        # 每个样本单独束搜索
-        beams = [{'seq': [], 'score': 0.0, 'last_char': None}]
-        
-        for t in range(T):
-            all_candidates = []
-            for beam in beams:
-                probs = log_probs[t, b].cpu()
-                top_k = probs.topk(beam_width)
-                for idx, prob in zip(top_k.indices, top_k.values):
-                    idx = idx.item()
-                    prob = prob.item()
-                    
-                    if idx == blank_id:
-                        # Blank字符：不添加到序列
-                        new_beam = {
-                            'seq': beam['seq'].copy(),
-                            'score': beam['score'] + prob,
-                            'last_char': None
-                        }
-                    elif idx == beam['last_char']:
-                        # 与上一个字符相同（不是blank）
-                        # 只在之前的beam上累加分数
-                        new_beam = {
-                            'seq': beam['seq'].copy(),
-                            'score': beam['score'] + prob,
-                            'last_char': idx
-                        }
-                    else:
-                        # 新字符
-                        new_seq = beam['seq'] + [idx]
-                        new_beam = {
-                            'seq': new_seq,
-                            'score': beam['score'] + prob,
-                            'last_char': idx
-                        }
-                    all_candidates.append(new_beam)
-            
-            # 保留top beam_width个
-            all_candidates.sort(key=lambda x: x['score'], reverse=True)
-            beams = all_candidates[:beam_width]
-        
-        # 返回最好的beam
-        if beams:
-            batch_sequences.append(beams[0]['seq'])
-        else:
-            batch_sequences.append([])
-    
-    return batch_sequences
-
-
 def _edit_distance(seq1: list[int], seq2: list[int]) -> int:
     m, n = len(seq1), len(seq2)
     if m == 0:
@@ -167,11 +149,7 @@ def _edit_distance(seq1: list[int], seq2: list[int]) -> int:
     for i in range(1, m + 1):
         for j in range(1, n + 1):
             cost = 0 if seq1[i - 1] == seq2[j - 1] else 1
-            dp[i][j] = min(
-                dp[i - 1][j] + 1,
-                dp[i][j - 1] + 1,
-                dp[i - 1][j - 1] + cost,
-            )
+            dp[i][j] = min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost)
     return dp[m][n]
 
 
@@ -183,14 +161,25 @@ def _safe_ratio(numerator: float, denominator: float) -> float:
     return numerator / denominator if denominator else 0.0
 
 
+class LabelSmoothingCrossEntropy(nn.Module):
+    """标签平滑的CTC损失包装器"""
+    def __init__(self, criterion: nn.Module, smoothing: float = 0.1):
+        super().__init__()
+        self.criterion = criterion
+        self.smoothing = smoothing
+    
+    def forward(self, log_probs, targets, input_lengths, target_lengths):
+        # CTC损失本身不做标签平滑
+        return self.criterion(log_probs, targets, input_lengths, target_lengths)
+
+
 def _run_epoch(
     model: nn.Module,
     loader: torch.utils.data.DataLoader,
     criterion: nn.Module,
     device: torch.device,
     optimizer: torch.optim.Optimizer | None = None,
-    scheduler: torch.optim.lr_scheduler._LRScheduler | None = None,
-    use_beam: bool = False,
+    scheduler: Any = None,
 ) -> tuple[EpochMetrics, list[dict[str, str]]]:
     is_train = optimizer is not None
     model.train(is_train)
@@ -218,21 +207,16 @@ def _run_epoch(
             if is_train:
                 optimizer.zero_grad()
                 loss.backward()
-                # 梯度裁剪：防止梯度爆炸
+                # 梯度裁剪
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
                 optimizer.step()
-                if scheduler is not None and not isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                if scheduler is not None:
                     scheduler.step()
 
         total_loss += float(loss.item())
         total_batches += 1
 
-        # 使用beam search解码（验证时使用）
-        if use_beam and not is_train:
-            log_probs_detach = log_probs.detach().cpu()
-            decoded = _beam_search_decode(log_probs_detach, blank_id=0, beam_width=5)
-        else:
-            decoded = _greedy_decode(logits.detach().cpu())
+        decoded = _greedy_decode(logits.detach().cpu())
         
         start = 0
         target_lengths_list = target_lengths.detach().cpu().tolist()
@@ -244,14 +228,12 @@ def _run_epoch(
             total_pred_tokens += len(pred_seq)
             total_correct_tokens += sum(1 for a, b in zip(pred_seq, target_seq) if a == b)
             total_sequences += 1
-            if len(preview) < 3:
-                preview.append(
-                    {
-                        'number': str(metas[i].get('number', 'unknown')),
-                        'target_ids': json.dumps(target_seq, ensure_ascii=False),
-                        'pred_ids': json.dumps(pred_seq, ensure_ascii=False),
-                    }
-                )
+            if len(preview) < 5:
+                preview.append({
+                    'number': str(metas[i].get('number', 'unknown')),
+                    'target_ids': json.dumps(target_seq, ensure_ascii=False),
+                    'pred_ids': json.dumps(pred_seq, ensure_ascii=False),
+                })
             start += target_len
 
     metrics = EpochMetrics(
@@ -277,21 +259,8 @@ def _write_metrics_csv(path: Path, history: list[dict[str, Any]]) -> None:
         writer.writerows(history)
 
 
-def _save_checkpoint(path: Path, *, epoch: int, model: nn.Module, optimizer: torch.optim.Optimizer, 
-                     scheduler: Any, token_map: dict[str, int], config: dict[str, Any], 
-                     history: list[dict[str, Any]], best_metric: float) -> None:
-    checkpoint = {
-        'epoch': epoch,
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'token_map': token_map,
-        'config': config,
-        'history': history,
-        'best_metric': best_metric,
-    }
-    if scheduler is not None:
-        checkpoint['scheduler_state_dict'] = scheduler.state_dict()
-    torch.save(checkpoint, path)
+def _save_checkpoint(path: Path, **kwargs) -> None:
+    torch.save(kwargs, path)
 
 
 def main() -> None:
@@ -301,21 +270,28 @@ def main() -> None:
     base_dir = Path(__file__).resolve().parents[1]
     manifest_path = base_dir / config['data']['processed_records']
     manifest = _load_manifest(manifest_path)
-    samples, token_map = _build_sequence_samples(manifest, base_dir)
+    
+    # 使用词汇过滤
+    min_token_freq = config['data'].get('min_token_freq', 2)
+    samples, token_map, token_counter = _build_sequence_samples_with_vocab_filtering(
+        manifest, base_dir, min_token_freq
+    )
     id_to_token = {idx: token for token, idx in token_map.items()}
+    
+    num_classes = len(token_map)
+    print(f'\n最终类别数: {num_classes}')
+    print(f'样本数: {len(samples)}')
 
-    print('=' * 60)
+    print('\n' + '=' * 60)
     print('训练配置')
     print('=' * 60)
-    print(f'样本数: {len(samples)}')
-    print(f'词汇类别数: {len(token_map)}')
+    print(f'模型参数量: ~{num_classes} 个输出类别')
     print(f'学习率: {config["train"]["lr"]}')
     print(f'隐藏层大小: {config["model"]["hidden_size"]}')
     print(f'LSTM层数: {config["model"]["lstm_layers"]}')
-    print(f'TCN通道: {config["model"]["tcn_channels"]}')
     print(f'Dropout: {config["model"]["dropout"]}')
     print(f'Batch Size: {config["train"]["batch_size"]}')
-    print(f'早停耐心值: {config["train"].get("patience", 10)}')
+    print(f'早停耐心值: {config["train"].get("patience", 15)}')
     print('=' * 60)
 
     device_name = config['train']['device']
@@ -324,7 +300,7 @@ def main() -> None:
 
     model = TCNBiLSTM(
         input_dim=config['model'].get('input_dim', config['data']['feature_dim']),
-        num_classes=len(token_map) + 1,
+        num_classes=num_classes,
         hidden_size=config['model']['hidden_size'],
         lstm_layers=config['model']['lstm_layers'],
         dropout=config['model']['dropout'],
@@ -333,103 +309,61 @@ def main() -> None:
     print(f'Model ready: {sum(p.numel() for p in model.parameters())} parameters')
 
     dataset = SignLanguageSequenceDataset(samples)
-    if len(dataset) < 3:
-        raise ValueError('Need at least 3 sequence samples to continue')
+    if len(dataset) < 10:
+        raise ValueError('Need at least 10 sequence samples')
 
-    # 调整数据分割比例：80/10/10
-    train_ratio = float(config['data'].get('train_ratio', 0.8))
-    val_ratio = float(config['data'].get('val_ratio', 0.1))
-    test_ratio = float(config['data'].get('test_ratio', 0.1))
-    ratio_sum = train_ratio + val_ratio + test_ratio
-    if ratio_sum <= 0:
-        raise ValueError('Data split ratios must be positive')
-    train_ratio /= ratio_sum
-    val_ratio /= ratio_sum
-    test_ratio /= ratio_sum
-
+    # 数据分割 80/10/10
+    train_ratio = 0.8
+    val_ratio = 0.1
     total = len(dataset)
-    train_size = max(int(total * train_ratio), 1)
-    val_size = max(int(total * val_ratio), 1)
+    train_size = int(total * train_ratio)
+    val_size = int(total * val_ratio)
     test_size = total - train_size - val_size
-    if test_size < 1:
-        test_size = 1
-        if train_size > val_size:
-            train_size -= 1
-        else:
-            val_size -= 1
-    if train_size < 1 or val_size < 1 or test_size < 1:
-        raise ValueError('Not enough samples for train/val/test split')
-    if train_size + val_size + test_size != total:
-        val_size += total - (train_size + val_size + test_size)
-    if train_size + val_size + test_size != total:
-        raise ValueError('Failed to build an exact dataset split')
 
     generator = torch.Generator().manual_seed(config['project']['seed'])
     train_ds, val_ds, test_ds = torch.utils.data.random_split(
-        dataset,
-        [train_size, val_size, test_size],
-        generator=generator,
+        dataset, [train_size, val_size, test_size], generator=generator
     )
     
-    # 打印数据分布
     print(f'\n数据分布:')
     print(f'  训练集: {train_size} ({train_size/total*100:.1f}%)')
     print(f'  验证集: {val_size} ({val_size/total*100:.1f}%)')
     print(f'  测试集: {test_size} ({test_size/total*100:.1f}%)')
-    print()
 
     train_loader = torch.utils.data.DataLoader(
-        train_ds,
-        batch_size=config['train']['batch_size'],
-        shuffle=True,
-        num_workers=config['train']['num_workers'],
-        collate_fn=collate_sequence_batch,
-        pin_memory=True,  # 加速数据传输到GPU
+        train_ds, batch_size=config['train']['batch_size'],
+        shuffle=True, num_workers=config['train']['num_workers'],
+        collate_fn=collate_sequence_batch, pin_memory=True
     )
     val_loader = torch.utils.data.DataLoader(
-        val_ds,
-        batch_size=config['train']['batch_size'],
-        shuffle=False,
-        num_workers=config['train']['num_workers'],
-        collate_fn=collate_sequence_batch,
-        pin_memory=True,
+        val_ds, batch_size=config['train']['batch_size'],
+        shuffle=False, num_workers=config['train']['num_workers'],
+        collate_fn=collate_sequence_batch, pin_memory=True
     )
     test_loader = torch.utils.data.DataLoader(
-        test_ds,
-        batch_size=config['train']['batch_size'],
-        shuffle=False,
-        num_workers=config['train']['num_workers'],
-        collate_fn=collate_sequence_batch,
-        pin_memory=True,
+        test_ds, batch_size=config['train']['batch_size'],
+        shuffle=False, num_workers=config['train']['num_workers'],
+        collate_fn=collate_sequence_batch, pin_memory=True
     )
 
     work_dir = base_dir / config['project']['work_dir']
     work_dir.mkdir(parents=True, exist_ok=True)
     save_json(work_dir / 'token_map.json', token_map)
-    save_json(
-        work_dir / 'sequence_prep_summary.json',
-        {
-            'num_manifest_records': len(manifest),
-            'num_samples': len(samples),
-            'num_tokens': len(token_map),
-            'input_shape': [config['data']['sequence_length'], config['data']['feature_dim']],
-            'label_type': 'gloss_sequence',
-            'split_sizes': {'train': train_size, 'val': val_size, 'test': test_size},
-            'split_ratios': {'train': train_ratio, 'val': val_ratio, 'test': test_ratio},
-            'note': 'CTC training with improved hyperparameters.',
-        },
-    )
+    
+    # 保存词频统计
+    save_json(work_dir / 'token_frequency.json', 
+               {k: v for k, v in token_counter.most_common(100)})
 
+    # CTC损失
     criterion = nn.CTCLoss(blank=0, zero_infinity=True)
     
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config['train']['lr'],
         weight_decay=config['train']['weight_decay'],
-        betas=(0.9, 0.999),
     )
     
-    # 学习率调度器：余弦退火
+    # 学习率调度
     epochs = int(config['train']['epochs'])
     warmup_epochs = config['train'].get('warmup_epochs', 5)
     use_scheduler = config['train'].get('use_scheduler', True)
@@ -437,156 +371,109 @@ def main() -> None:
     
     scheduler = None
     if use_scheduler:
-        # 先线性预热，再余弦退火
         def lr_lambda(epoch):
             if epoch <= warmup_epochs:
                 return epoch / warmup_epochs
-            else:
-                progress = (epoch - warmup_epochs) / max(epochs - warmup_epochs, 1)
-                return max(0.5 * (1.0 + math.cos(math.pi * progress)), min_lr / config['train']['lr'])
-        
+            progress = (epoch - warmup_epochs) / max(epochs - warmup_epochs, 1)
+            return max(0.5 * (1.0 + math.cos(math.pi * progress)), min_lr / config['train']['lr'])
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
-    best_val_loss = float('inf')
     best_val_ter = float('inf')
-    patience = config['train'].get('patience', 15)
+    patience = config['train'].get('patience', 20)
     patience_counter = 0
     history: list[dict[str, Any]] = []
 
-    print(f'\n开始训练 (最多 {epochs} epochs, 早停 patience={patience})...\n')
+    print(f'\n开始训练 (最多 {epochs} epochs, patience={patience})...\n')
 
     for epoch in range(1, epochs + 1):
         current_lr = optimizer.param_groups[0]['lr']
         
-        train_metrics, train_preview = _run_epoch(
-            model, train_loader, criterion, device, optimizer, scheduler
-        )
-        val_metrics, val_preview = _run_epoch(
-            model, val_loader, criterion, device, optimizer=None, use_beam=True
-        )
-        
-        # ReduceLROnPlateau调度器需要基于验证损失更新
-        if scheduler is not None and isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-            scheduler.step(val_metrics.loss)
+        train_metrics, _ = _run_epoch(model, train_loader, criterion, device, optimizer, scheduler)
+        val_metrics, val_preview = _run_epoch(model, val_loader, criterion, device, optimizer=None)
         
         train_metrics.epoch = epoch
-        train_metrics.split = 'train'
         val_metrics.epoch = epoch
-        val_metrics.split = 'val'
 
         epoch_record = {
             'epoch': epoch,
             'lr': current_lr,
             'train_loss': train_metrics.loss,
-            'train_token_error_rate': train_metrics.token_error_rate,
-            'train_token_accuracy': train_metrics.token_accuracy,
+            'train_TER': train_metrics.token_error_rate,
+            'train_ACC': train_metrics.token_accuracy,
             'val_loss': val_metrics.loss,
-            'val_token_error_rate': val_metrics.token_error_rate,
-            'val_token_accuracy': val_metrics.token_accuracy,
+            'val_TER': val_metrics.token_error_rate,
+            'val_ACC': val_metrics.token_accuracy,
         }
         history.append(epoch_record)
 
         print(
-            f'Epoch {epoch:03d} | lr={current_lr:.6f} | '
-            f'train_loss={train_metrics.loss:.4f} train_TER={train_metrics.token_error_rate:.4f} '
-            f'train_ACC={train_metrics.token_accuracy:.4f} | '
-            f'val_loss={val_metrics.loss:.4f} val_TER={val_metrics.token_error_rate:.4f} '
-            f'val_ACC={val_metrics.token_accuracy:.4f}'
+            f'E {epoch:03d} | lr={current_lr:.6f} | '
+            f'tr_loss={train_metrics.loss:.4f} tr_TER={train_metrics.token_error_rate:.4f} | '
+            f'val_loss={val_metrics.loss:.4f} val_TER={val_metrics.token_error_rate:.4f} val_ACC={val_metrics.token_accuracy:.4f}'
         )
 
-        if val_preview:
-            preview = val_preview[0]
-            target_ids = json.loads(preview['target_ids'])
-            pred_ids = json.loads(preview['pred_ids'])
-            print(f'  sample: {preview["number"]}')
-            print(f'  target: {_decode_to_tokens(target_ids, id_to_token)}')
-            print(f'  pred  : {_decode_to_tokens(pred_ids, id_to_token)}')
+        if val_preview and epoch % 10 == 0:
+            for pv in val_preview[:3]:
+                target_ids = json.loads(pv['target_ids'])
+                pred_ids = json.loads(pv['pred_ids'])
+                print(f'  [{pv["number"]}] tgt:{_decode_to_tokens(target_ids, id_to_token)}')
+                print(f'        pred:{_decode_to_tokens(pred_ids, id_to_token)}')
 
-        # 保存最新checkpoint
-        _save_checkpoint(
-            work_dir / 'latest.pt',
-            epoch=epoch,
-            model=model,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            token_map=token_map,
-            config=config,
-            history=history,
-            best_metric=best_val_ter,
+        _save_checkpoint(work_dir / 'latest.pt',
+            epoch=epoch, model=model, optimizer=optimizer, token_map=token_map,
+            config=config, history=history, best_metric=best_val_ter
         )
         
-        # 保存最佳模型（基于TER）
         if val_metrics.token_error_rate < best_val_ter:
             best_val_ter = val_metrics.token_error_rate
             patience_counter = 0
-            print(f'  [NEW BEST] val_TER={best_val_ter:.4f}')
-            _save_checkpoint(
-                work_dir / 'best.pt',
-                epoch=epoch,
-                model=model,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                token_map=token_map,
-                config=config,
-                history=history,
-                best_metric=best_val_ter,
+            print(f'  *** NEW BEST val_TER={best_val_ter:.4f} ***')
+            _save_checkpoint(work_dir / 'best.pt',
+                epoch=epoch, model=model, optimizer=optimizer, token_map=token_map,
+                config=config, history=history, best_metric=best_val_ter
             )
         else:
             patience_counter += 1
         
-        # 早停检查
         if patience_counter >= patience:
-            print(f'\n[早停] 验证损失连续 {patience} 个epoch没有改善，停止训练')
+            print(f'\n[早停] 连续 {patience} 轮无改善')
             break
         
-        # 学习率过低检查
         if current_lr < min_lr * 1.1:
-            print(f'\n[早停] 学习率已降至最小值 {min_lr}')
+            print(f'\n[早停] 学习率已降至最小')
             break
-        
-        print()
 
     print('\n' + '=' * 60)
     print('训练完成!')
     print('=' * 60)
 
-    # 加载最佳模型进行测试
-    best_checkpoint = torch.load(work_dir / 'best.pt')
-    model.load_state_dict(best_checkpoint['model_state_dict'])
-    print(f'使用第 {best_checkpoint["epoch"]} 轮的模型进行测试\n')
+    # 测试最佳模型
+    if (work_dir / 'best.pt').exists():
+        best_checkpoint = torch.load(work_dir / 'best.pt')
+        model.load_state_dict(best_checkpoint['model_state_dict'])
+        print(f'加载第 {best_checkpoint["epoch"]} 轮最佳模型\n')
 
-    test_metrics, test_preview = _run_epoch(
-        model, test_loader, criterion, device, optimizer=None, use_beam=True
-    )
+    test_metrics, test_preview = _run_epoch(model, test_loader, criterion, device)
     print(
-        f'Test | loss={test_metrics.loss:.4f} token_error_rate={test_metrics.token_error_rate:.4f} '
-        f'token_accuracy={test_metrics.token_accuracy:.4f}'
+        f'Test | loss={test_metrics.loss:.4f} TER={test_metrics.token_error_rate:.4f} ACC={test_metrics.token_accuracy:.4f}'
     )
     if test_preview:
-        for i, preview in enumerate(test_preview[:3]):
+        for i, preview in enumerate(test_preview[:5]):
             target_ids = json.loads(preview['target_ids'])
             pred_ids = json.loads(preview['pred_ids'])
-            print(f'  [{i+1}] sample: {preview["number"]}')
-            print(f'      target: {_decode_to_tokens(target_ids, id_to_token)}')
-            print(f'      pred  : {_decode_to_tokens(pred_ids, id_to_token)}')
+            print(f'[{preview["number"]}]')
+            print(f'  T: {_decode_to_tokens(target_ids, id_to_token)}')
+            print(f'  P: {_decode_to_tokens(pred_ids, id_to_token)}')
 
     save_json(work_dir / 'train_history.json', history)
     _write_metrics_csv(work_dir / 'train_history.csv', history)
-    save_json(
-        work_dir / 'final_metrics.json',
-        {
-            'history': history,
-            'test': asdict(test_metrics),
-            'best_val_token_error_rate': best_val_ter,
-            'best_epoch': best_checkpoint['epoch'],
-            'num_epochs_trained': len(history),
-        },
-    )
-    print(f'\nArtifacts saved to: {work_dir}')
-    print(f'  - best.pt: 最佳验证TER的模型')
-    print(f'  - latest.pt: 最后一轮的模型')
-    print(f'  - train_history.json: 训练历史')
-    print(f'  - token_map.json: 词汇表映射')
+    save_json(work_dir / 'final_metrics.json', {
+        'history': history,
+        'test': asdict(test_metrics),
+        'best_val_TER': best_val_ter,
+        'num_classes': num_classes,
+    })
+    print(f'\n结果保存至: {work_dir}')
 
 
 if __name__ == '__main__':

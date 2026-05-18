@@ -14,28 +14,29 @@ data:
   val_ratio: 0.1
   test_ratio: 0.1
   feature_type: mediapipe_hand_keypoints
+  min_token_freq: 3  # 最小词频阈值，低于此值的词会被映射到<unk>
 
 model:
   name: tcn_bilstm
   num_classes: 10
-  hidden_size: 256      # 增大：64 -> 256
-  tcn_channels: [128, 256, 256]  # 增加到3层
-  lstm_layers: 2        # 增加：1 -> 2
-  dropout: 0.3          # 降低：0.5 -> 0.3
+  hidden_size: 256
+  tcn_channels: [128, 256, 256]
+  lstm_layers: 2
+  dropout: 0.3
   input_dim: 84
 
 train:
   batch_size: 32
-  epochs: 150           # 适度增加，配合早停
-  lr: 0.0003           # 大幅降低：0.001 -> 0.0003
-  weight_decay: 0.0001  # 降低正则化
+  epochs: 200
+  lr: 0.0005
+  weight_decay: 0.0001
   num_workers: 4
   device: cuda
   log_interval: 10
-  patience: 15          # 早停耐心值
-  warmup_epochs: 5      # 学习率预热
-  use_scheduler: true  # 使用学习率调度器
-  min_lr: 0.00001      # 最小学习率
+  patience: 25
+  warmup_epochs: 5
+  use_scheduler: true
+  min_lr: 0.00001
 
 deploy:
   export_format: onnx
