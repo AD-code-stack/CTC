@@ -18,23 +18,20 @@ data:
 model:
   name: tcn_bilstm
   num_classes: 10
-  hidden_size: 256
-  tcn_channels: [128, 256, 512]
-  lstm_layers: 2
-  dropout: 0.3
+  hidden_size: 64
+  tcn_channels: [64, 128]
+  lstm_layers: 1
+  dropout: 0.5
   input_dim: 84
 
 train:
   batch_size: 32
-  epochs: 150
-  lr: 0.002
-  weight_decay: 0.0001
+  epochs: 100
+  lr: 0.001
+  weight_decay: 0.001
   num_workers: 4
   device: cuda
   log_interval: 10
-  lr_scheduler: cosine
-  warmup_epochs: 5
-  min_lr: 0.00001
 
 deploy:
   export_format: onnx
