@@ -229,7 +229,8 @@ def build_processed_dataset(
                 missing_videos.append(f'{split}:{translator}:{number}')
                 continue
 
-            feature_path = split_feature_dir / f'{number}.npy'
+            feature_filename = f'{number}.npy'
+            feature_path = split_feature_dir / feature_filename
             features = extract_keypoint_features(video_path, max_frames=sequence_length)
             if features.shape[1] != feature_dim:
                 raise ValueError(
@@ -237,6 +238,9 @@ def build_processed_dataset(
                     f'expected {feature_dim}, got {features.shape[1]}'
                 )
             np.save(feature_path, features)
+
+            # 使用相对于 processed_root 的相对路径，便于跨平台使用
+            relative_feature_path = f'features/{split}/{feature_filename}'
 
             safe_gloss = _safe_gloss(gloss, translator, number)
             items.append(
@@ -249,7 +253,7 @@ def build_processed_dataset(
                     gloss_tokens=_split_gloss(safe_gloss),
                     note=note,
                     video_path=str(video_path),
-                    feature_path=str(feature_path),
+                    feature_path=relative_feature_path,
                     num_frames=int(features.shape[0]),
                     feature_dim=int(features.shape[1]),
                 )

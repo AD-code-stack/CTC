@@ -43,7 +43,7 @@ def _load_manifest(manifest_path: Path) -> list[dict[str, Any]]:
     return data
 
 
-def _build_sequence_samples(manifest: list[dict[str, Any]]) -> tuple[list[SequenceSample], dict[str, int]]:
+def _build_sequence_samples(manifest: list[dict[str, Any]], base_dir: Path) -> tuple[list[SequenceSample], dict[str, int]]:
     token_names: list[str] = []
     for item in manifest:
         tokens = item.get('gloss_tokens') or []
@@ -53,10 +53,12 @@ def _build_sequence_samples(manifest: list[dict[str, Any]]) -> tuple[list[Sequen
 
     samples: list[SequenceSample] = []
     for item in manifest:
-        feature_path = item.get('feature_path')
+        feature_path_str = item.get('feature_path')
         tokens = [str(token).strip() for token in (item.get('gloss_tokens') or []) if str(token).strip()]
-        if not feature_path or not tokens:
+        if not feature_path_str or not tokens:
             continue
+        # 拼接项目根目录，使用相对路径
+        feature_path = base_dir / feature_path_str
         token_ids = [token_map[token] for token in tokens if token in token_map]
         if not token_ids:
             continue
@@ -222,7 +224,7 @@ def main() -> None:
     base_dir = Path(__file__).resolve().parents[1]
     manifest_path = base_dir / config['data']['processed_records']
     manifest = _load_manifest(manifest_path)
-    samples, token_map = _build_sequence_samples(manifest)
+    samples, token_map = _build_sequence_samples(manifest, base_dir)
     id_to_token = {idx: token for token, idx in token_map.items()}
 
     print(f'Loaded processed manifest: {len(manifest)} records')
