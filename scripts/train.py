@@ -370,12 +370,17 @@ def main() -> None:
     min_lr = config['train'].get('min_lr', 0.00001)
     
     scheduler = None
+    base_lr = config['train']['lr']
     if use_scheduler:
         def lr_lambda(epoch):
             if epoch <= warmup_epochs:
+                # warmup: 线性从0增长到base_lr
                 return epoch / warmup_epochs
-            progress = (epoch - warmup_epochs) / max(epochs - warmup_epochs, 1)
-            return max(0.5 * (1.0 + math.cos(math.pi * progress)), min_lr / config['train']['lr'])
+            else:
+                # 余弦退火: 从base_lr缓慢下降到min_lr
+                progress = (epoch - warmup_epochs) / max(epochs - warmup_epochs, 1)
+                cosine_factor = 0.5 * (1.0 + math.cos(math.pi * progress))
+                return max(cosine_factor, min_lr / base_lr)
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     best_val_ter = float('inf')
