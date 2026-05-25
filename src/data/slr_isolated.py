@@ -152,6 +152,7 @@ def build_isolated_word_dataset(
     dictionary_file: str | Path | None = None,
     sequence_length: int = DEFAULT_SEQUENCE_LENGTH,
     split_ratio: tuple[float, float, float] = (0.8, 0.1, 0.1),
+    seed: int = 42,
 ) -> list[IsolatedWordItem]:
     raw_root = Path(raw_root)
     processed_root = Path(processed_root)
@@ -200,19 +201,47 @@ def build_isolated_word_dataset(
     for item in items:
         item.label_id = label_map[item.label_name]
 
-    n = len(items)
-    train_end = int(n * split_ratio[0])
-    val_end = train_end + int(n * split_ratio[1])
-    for i, item in enumerate(items):
-        if i < train_end:
-            item.split = 'train'
-        elif i < val_end:
-            item.split = 'val'
-        else:
-            item.split = 'test'
-        item.feature_path = f'data/processed/features/{item.sample_id}.npy'
+    rng = np.random.default_rng(seed)
+    items_by_label: dict[str, list[IsolatedWordItem]] = {}
+    for item in items:
+        items_by_label.setdefault(item.label_name, []).append(item)
 
-    manifest = [asdict(item) for item in items]
+    shuffled_items: list[IsolatedWordItem] = []
+    for label_name in sorted(items_by_label):
+        label_items = items_by_label[label_name]
+        indices = np.arange(len(label_items))
+        rng.shuffle(indices)
+        shuffled_items.extend([label_items[i] for i in indices])
+
+    split_buckets: dict[str, list[IsolatedWordItem]] = {'train': [], 'val': [], 'test': []}
+    for label_name in sorted(items_by_label):
+        label_items = items_by_label[label_name]
+        indices = np.arange(len(label_items))
+        rng.shuffle(indices)
+        label_items = [label_items[i] for i in indices]
+
+        n = len(label_items)
+        train_end = int(n * split_ratio[0])
+        val_end = train_end + int(n * split_ratio[1])
+        for i, item in enumerate(label_items):
+            if i < train_end:
+                split_buckets['train'].append(item)
+            elif i < val_end:
+                split_buckets['val'].append(item)
+            else:
+                split_buckets['test'].append(item)
+
+    for split_name, split_items in split_buckets.items():
+        for item in split_items:
+            item.split = split_name
+            item.feature_path = f'data/processed/features/{item.sample_id}.npy'
+
+    for split_name, split_items in split_buckets.items():
+        for item in split_items:
+            item.split = split_name
+            item.feature_path = f'data/processed/features/{item.sample_id}.npy'
+
+    manifest = [asdict(item) for item in split_buckets['train'] + split_buckets['val'] + split_buckets['test']]
     save_json(processed_root / 'isolated_word_manifest.json', manifest)
     save_json(label_root / 'label_map.json', label_map)
     save_json(
@@ -224,11 +253,13 @@ def build_isolated_word_dataset(
             'feature_dim': int(items[0].feature_dim) if items else 0,
             'dictionary_file': str(dictionary_file) if dictionary_file else None,
             'raw_root': str(raw_root),
+            'split_ratio': {'train': split_ratio[0], 'val': split_ratio[1], 'test': split_ratio[2]},
+            'seed': seed,
         },
     )
 
     for split in ('train', 'val', 'test'):
-        split_items = [asdict(item) for item in items if item.split == split]
+        split_items = [asdict(item) for item in split_buckets[split]]
         save_json(manifest_root / f'{split}.json', split_items)
 
-    return items
+    return split_buckets['train'] + split_buckets['val'] + split_buckets['test']

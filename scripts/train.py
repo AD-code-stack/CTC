@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
+
+base = Path(__file__).resolve().parents[1]
+if str(base) not in sys.path:
+    sys.path.insert(0, str(base))
 
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
-from src.data.dataset import IsolatedWordDataset, Sample
+from src.data.dataset import IsolatedWordDataset, IsolatedWordSample
 from src.data.slr_isolated import load_dictionary
 from src.models.tcn_bilstm import TCNBiLSTM
 from src.utils.io import load_json, load_yaml, save_json
@@ -20,16 +25,16 @@ def _resolve_path(base: Path, path_value: str) -> Path:
 
 def _load_split_samples(base: Path, manifest_path: Path):
     records = load_json(manifest_path)
-    samples: list[Sample] = []
+    samples: list[IsolatedWordSample] = []
     for record in records:
         feature_path = _resolve_path(base, record['feature_path'])
         samples.append(
-            Sample(
+            IsolatedWordSample(
                 feature_path=feature_path,
-                label=int(record['label_id']),
+                label_id=int(record['label_id']),
+                label_name=record.get('label_name', ''),
+                sample_id=record.get('sample_id', ''),
                 meta={
-                    'sample_id': record.get('sample_id'),
-                    'label_name': record.get('label_name'),
                     'source_path': record.get('source_path'),
                     'split': record.get('split'),
                 },

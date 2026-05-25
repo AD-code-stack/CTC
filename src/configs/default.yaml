@@ -4,9 +4,9 @@ project:
   work_dir: experiments
 
 data:
-  raw_dir: data/raw/SLR_Dataset/【孤立词】SLR_dataset
+  raw_dir: data/raw/xf500_body_color_txt
   processed_dir: data/processed
-  dictionary_file: data/raw/SLR_Dataset/【孤立词】SLR_dataset/dictionary.txt
+  dictionary_file: data/raw/dictionary.txt
   processed_records: data/processed/isolated_word_manifest.json
   sequence_length: 32
   feature_dim: 50
@@ -26,9 +26,9 @@ model:
 
 train:
   batch_size: 32
-  epochs: 50
+  epochs: 80
   lr: 0.001
-  weight_decay: 0.0001
+  weight_decay: 0.0005
   num_workers: 4
   device: cuda
   log_interval: 10

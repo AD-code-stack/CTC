@@ -47,4 +47,5 @@ class TCNBiLSTM(nn.Module):
         x = self.backbone(x)
         x = x.transpose(1, 2)
         x, _ = self.lstm(x)
+        x = x[:, -1, :]
         return self.classifier(x)
