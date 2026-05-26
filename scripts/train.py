@@ -133,6 +133,10 @@ def main() -> None:
     work_dir = _resolve_path(base, config['project']['work_dir']) / 'isolated_word'
     work_dir.mkdir(parents=True, exist_ok=True)
 
+    summary_path = processed_dir / 'stats' / 'dataset_summary.json'
+    summary = load_json(summary_path) if summary_path.exists() else {}
+    modalities = summary.get('modalities', ['color'])
+
     train_manifest = processed_dir / 'manifests' / 'train.json'
     val_manifest = processed_dir / 'manifests' / 'val.json'
     test_manifest = processed_dir / 'manifests' / 'test.json'
@@ -146,6 +150,7 @@ def main() -> None:
 
     label_map = load_json(processed_dir / 'labels' / 'label_map.json')
     num_classes = len(label_map)
+    print(f'Loaded processed dataset modalities: {modalities}')
 
     train_loader = DataLoader(
         IsolatedWordDataset(train_samples),

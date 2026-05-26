@@ -19,6 +19,7 @@ class IsolatedWordItem:
     num_frames: int
     feature_dim: int
     split: str
+    modalities: list[str]
 
 
 DEFAULT_SEQUENCE_LENGTH = 32
@@ -95,11 +96,6 @@ def scan_isolated_word_files(raw_root: str | Path) -> list[Path]:
     return sorted({p.resolve() for p in candidates if p.is_file()})
 
 
-def _infer_label_from_parent(txt_path: Path, class_dir_to_label: dict[str, str]) -> str | None:
-    parent_name = txt_path.parent.name
-    return class_dir_to_label.get(parent_name)
-
-
 def _infer_label_from_filename(txt_path: Path, dictionary: dict[str, str]) -> str | None:
     stem = txt_path.stem
     for key, label in dictionary.items():
@@ -134,16 +130,38 @@ def _discover_samples(raw_root: Path, dictionary: dict[str, str]) -> list[tuple[
             for txt_path in sorted(class_dir.rglob('*.txt')):
                 if not txt_path.is_file():
                     continue
-                if label_name is None:
-                    label_name = _infer_label_from_filename(txt_path, dictionary)
-                if label_name is None:
-                    label_name = class_dir.name
-                samples.append((txt_path, label_name))
+                local_label = label_name or _infer_label_from_filename(txt_path, dictionary) or class_dir.name
+                samples.append((txt_path, local_label))
     else:
         for txt_path in scan_isolated_word_files(raw_root):
             label_name = _infer_label_from_filename(txt_path, dictionary) or txt_path.parent.name
             samples.append((txt_path, label_name))
     return samples
+
+
+def _find_matching_depth_file(color_path: Path, color_root: Path, depth_root: Path) -> Path | None:
+    try:
+        rel = color_path.relative_to(color_root)
+    except ValueError:
+        rel = Path(color_path.name)
+    candidates = [depth_root / rel, depth_root / rel.with_suffix('.txt')]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    for candidate in depth_root.rglob(color_path.name):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _merge_modalities(color_seq: np.ndarray, depth_seq: np.ndarray | None) -> np.ndarray:
+    if depth_seq is None:
+        return color_seq.astype(np.float32)
+    if color_seq.shape[0] != depth_seq.shape[0]:
+        target_length = min(color_seq.shape[0], depth_seq.shape[0])
+        color_seq = resample_sequence(color_seq, target_length)
+        depth_seq = resample_sequence(depth_seq, target_length)
+    return np.concatenate([color_seq.astype(np.float32), depth_seq.astype(np.float32)], axis=1)
 
 
 def build_isolated_word_dataset(
@@ -153,9 +171,11 @@ def build_isolated_word_dataset(
     sequence_length: int = DEFAULT_SEQUENCE_LENGTH,
     split_ratio: tuple[float, float, float] = (0.8, 0.1, 0.1),
     seed: int = 42,
+    depth_root: str | Path | None = None,
 ) -> list[IsolatedWordItem]:
     raw_root = Path(raw_root)
     processed_root = Path(processed_root)
+    depth_root_path = Path(depth_root) if depth_root else None
     feature_root = processed_root / 'features'
     manifest_root = processed_root / 'manifests'
     label_root = processed_root / 'labels'
@@ -171,12 +191,25 @@ def build_isolated_word_dataset(
     items: list[IsolatedWordItem] = []
     label_names: list[str] = []
     seen_ids: set[str] = set()
+    used_modalities = ['color']
+    if depth_root_path and depth_root_path.exists():
+        used_modalities.append('depth')
 
     for txt_path, label_name in samples:
-        seq = load_skeleton_sequence(txt_path)
-        if seq.size == 0:
+        color_seq = load_skeleton_sequence(txt_path)
+        if color_seq.size == 0:
             continue
-        seq = resample_sequence(seq, sequence_length)
+        color_seq = resample_sequence(color_seq, sequence_length)
+        depth_seq = None
+        if depth_root_path and depth_root_path.exists():
+            matched = _find_matching_depth_file(txt_path, raw_root, depth_root_path)
+            if matched is not None:
+                depth_seq = load_skeleton_sequence(matched)
+                if depth_seq.size > 0:
+                    depth_seq = resample_sequence(depth_seq, sequence_length)
+                else:
+                    depth_seq = None
+        seq = _merge_modalities(color_seq, depth_seq)
         sample_id = txt_path.parent.name + '_' + txt_path.stem
         if sample_id in seen_ids:
             sample_id = f'{sample_id}_{len(seen_ids)}'
@@ -192,6 +225,7 @@ def build_isolated_word_dataset(
                 num_frames=int(seq.shape[0]),
                 feature_dim=int(seq.shape[1]),
                 split='unknown',
+                modalities=used_modalities.copy(),
             )
         )
         np.save(feature_root / f'{sample_id}.npy', seq)
@@ -205,13 +239,6 @@ def build_isolated_word_dataset(
     items_by_label: dict[str, list[IsolatedWordItem]] = {}
     for item in items:
         items_by_label.setdefault(item.label_name, []).append(item)
-
-    shuffled_items: list[IsolatedWordItem] = []
-    for label_name in sorted(items_by_label):
-        label_items = items_by_label[label_name]
-        indices = np.arange(len(label_items))
-        rng.shuffle(indices)
-        shuffled_items.extend([label_items[i] for i in indices])
 
     split_buckets: dict[str, list[IsolatedWordItem]] = {'train': [], 'val': [], 'test': []}
     for label_name in sorted(items_by_label):
@@ -236,11 +263,6 @@ def build_isolated_word_dataset(
             item.split = split_name
             item.feature_path = f'data/processed/features/{item.sample_id}.npy'
 
-    for split_name, split_items in split_buckets.items():
-        for item in split_items:
-            item.split = split_name
-            item.feature_path = f'data/processed/features/{item.sample_id}.npy'
-
     manifest = [asdict(item) for item in split_buckets['train'] + split_buckets['val'] + split_buckets['test']]
     save_json(processed_root / 'isolated_word_manifest.json', manifest)
     save_json(label_root / 'label_map.json', label_map)
@@ -253,6 +275,8 @@ def build_isolated_word_dataset(
             'feature_dim': int(items[0].feature_dim) if items else 0,
             'dictionary_file': str(dictionary_file) if dictionary_file else None,
             'raw_root': str(raw_root),
+            'depth_root': str(depth_root_path) if depth_root_path else None,
+            'modalities': used_modalities,
             'split_ratio': {'train': split_ratio[0], 'val': split_ratio[1], 'test': split_ratio[2]},
             'seed': seed,
         },

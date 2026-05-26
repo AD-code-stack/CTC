@@ -53,12 +53,14 @@ def _validate_processed_dataset(processed_dir: Path) -> None:
     print('Processed dataset validation passed.')
     print(f"  Total records: {summary.get('total', len(all_records))}")
     print(f"  Classes: {summary.get('num_classes', len(label_map))}")
+    print(f"  Modalities: {summary.get('modalities', ['color'])}")
     print(f"  Train/Val/Test: {len(train_records)}/{len(val_records)}/{len(test_records)}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description='Prepare isolated-word SLR processed data.')
     parser.add_argument('--config', type=str, default=None, help='Path to YAML config file.')
+    parser.add_argument('--depth-dir', type=str, default=None, help='Optional depth raw directory path.')
     args = parser.parse_args()
 
     base = Path(__file__).resolve().parents[1]
@@ -69,6 +71,8 @@ def main() -> None:
     processed_dir = base / config['data']['processed_dir']
     sequence_length = int(config['data']['sequence_length'])
     dictionary_file = base / config['data']['dictionary_file']
+    depth_dir_value = args.depth_dir or config['data'].get('depth_raw_dir')
+    depth_dir = _resolve_path(base, depth_dir_value) if depth_dir_value else None
 
     if not raw_dir.exists():
         print(f'Raw dataset directory not found: {raw_dir}')
@@ -84,6 +88,7 @@ def main() -> None:
         sequence_length=sequence_length,
         split_ratio=(float(config['data']['train_ratio']), float(config['data']['val_ratio']), float(config['data']['test_ratio'])),
         seed=int(config['project'].get('seed', 42)),
+        depth_root=depth_dir,
     )
 
     print(f'Loaded {len(items)} isolated-word records.')
