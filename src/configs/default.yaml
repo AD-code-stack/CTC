@@ -5,6 +5,7 @@ project:
 
 data:
   raw_dir: data/raw/xf500_body_color_txt
+  depth_raw_dir: data/raw/xf500_body_depth_txt
   processed_dir: data/processed
   dictionary_file: data/raw/dictionary.txt
   processed_records: data/processed/isolated_word_manifest.json

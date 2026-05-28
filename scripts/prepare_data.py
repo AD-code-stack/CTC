@@ -12,6 +12,13 @@ from src.data.slr_isolated import build_isolated_word_dataset
 from src.utils.io import load_json, load_yaml
 
 
+def _resolve_path(base: Path, path_value: str | None) -> Path | None:
+    if not path_value:
+        return None
+    path = Path(path_value)
+    return path if path.is_absolute() else base / path
+
+
 def _validate_processed_dataset(processed_dir: Path) -> None:
     manifest_dir = processed_dir / 'manifests'
     label_map_path = processed_dir / 'labels' / 'label_map.json'
