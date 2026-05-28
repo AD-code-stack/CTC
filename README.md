@@ -29,6 +29,7 @@
 本项目当前使用的孤立词数据目录应放在仓库内的 `data/raw/` 下，当前配置默认读取：
 
 - `data/raw/xf500_body_color_txt`：彩色图坐标系下的骨架 txt 序列，作为主输入
+- `data/raw/xf500_body_depth_txt`：深度图坐标系下的骨架 txt 序列，可与 color 配对用于双模态融合
 - `data/raw/dictionary.txt`：类别字典，负责把词语名称和类别编号对应起来
 
 ### 骨架数据格式
@@ -60,7 +61,7 @@
   -> 保存为 .npy 特征文件
   -> 生成 label map、manifest 与 summary
   -> PyTorch Dataset
-  -> TCN-BiLSTM 分类器
+  -> TCN-BiLSTM / 双分支 TCN-BiLSTM
   -> CrossEntropyLoss
   -> Accuracy / Macro F1 / Confusion Matrix
 ```
@@ -86,10 +87,16 @@
 
 ## 训练方法
 
-第一版训练建议采用：
+当前训练支持以下几种模式：
+
+- `single`：单分支 TCN-BiLSTM
+- `dual`：双分支 color/depth 融合
+- `auto`：自动根据数据模态选择
+
+推荐优先使用：
 
 - 输入：固定长度骨架序列
-- 模型：`TCN-BiLSTM`
+- 模型：`DualBranchTCNBiLSTM`
 - 输出：整段样本的类别 logits
 - 损失函数：`CrossEntropyLoss`
 - 指标：`Top-1 Accuracy`、`Macro F1`、`Top-5 Accuracy`
@@ -120,6 +127,12 @@ pip install -r requirements.txt
 python scripts/prepare_data.py
 ```
 
+如果 `depth` 目录已经准备好，也可以显式指定：
+
+```bash
+python scripts/prepare_data.py --depth-dir data/raw/xf500_body_depth_txt
+```
+
 该步骤会扫描原始孤立词数据，提取骨架序列并生成可训练的特征文件与清单。
 
 准备完成后脚本会自动做校验，包括：
@@ -134,7 +147,7 @@ python scripts/prepare_data.py
 如果你想在服务器上后台运行训练，推荐使用：
 
 ```bash
-nohup python -u scripts/train.py > train.log 2>&1 &
+nohup python -u scripts/train.py --fusion dual > train.log 2>&1 &
 ```
 
 训练日志会写入 `train.log`，可以通过下面命令查看进度：
@@ -175,6 +188,7 @@ python scripts/export_onnx.py
 当前项目的重点是把孤立词识别这条链路先跑通，而不是连续手语识别。后续如果数据量和标注更加充分，再考虑扩展到：
 
 - 双模态融合（color + depth）
+- 更复杂的融合策略（双分支、门控、注意力）
 - RGB 视频分类
 - 更复杂的时序模型
 - 端侧实时推理
