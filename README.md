@@ -17,7 +17,7 @@
   -> 保存为 .npy 特征文件
   -> 生成 label map 与 train/val/test manifest
   -> PyTorch Dataset / DataLoader
-  -> TCN-BiLSTM 分类器
+  -> GatedFusionTCNBiLSTM
   -> CrossEntropyLoss
   -> Accuracy / Macro F1 / Top-5 Accuracy
 ```
@@ -61,7 +61,7 @@
   -> 保存为 .npy 特征文件
   -> 生成 label map、manifest 与 summary
   -> PyTorch Dataset
-  -> TCN-BiLSTM / 双分支 TCN-BiLSTM
+  -> GatedFusionTCNBiLSTM / 双分支 TCNBiLSTM
   -> CrossEntropyLoss
   -> Accuracy / Macro F1 / Confusion Matrix
 ```
@@ -91,12 +91,13 @@
 
 - `single`：单分支 TCN-BiLSTM
 - `dual`：双分支 color/depth 融合
+- `gated`：门控融合，当前推荐主模型
 - `auto`：自动根据数据模态选择
 
 推荐优先使用：
 
 - 输入：固定长度骨架序列
-- 模型：`DualBranchTCNBiLSTM`
+- 模型：`GatedFusionTCNBiLSTM`
 - 输出：整段样本的类别 logits
 - 损失函数：`CrossEntropyLoss`
 - 指标：`Top-1 Accuracy`、`Macro F1`、`Top-5 Accuracy`
@@ -147,7 +148,7 @@ python scripts/prepare_data.py --depth-dir data/raw/xf500_body_depth_txt
 如果你想在服务器上后台运行训练，推荐使用：
 
 ```bash
-nohup python -u scripts/train.py --fusion dual > train.log 2>&1 &
+nohup python -u scripts/train.py --fusion gated > train.log 2>&1 &
 ```
 
 训练日志会写入 `train.log`，可以通过下面命令查看进度：
@@ -170,28 +171,126 @@ python scripts/grid_search.py \
 
 默认会把每次实验结果保存到 `experiments/grid_search/`。
 
-### 5. 评估与推理
+### 5. 导出模型
+
+训练完成后，可以使用导出脚本生成板端部署可用的模型文件：
 
 ```bash
-python scripts/eval.py
-python scripts/infer.py --input path/to/sample.txt
+python scripts/export_model.py \
+  --checkpoint experiments/isolated_word/best_model.pt \
+  --fusion gated \
+  --format both \
+  --output-dir exports/gated_best
 ```
 
-如果需要导出 ONNX，可以继续使用：
+导出结果包括：
 
-```bash
-python scripts/export_onnx.py
+- `model_ts.pt`：TorchScript 模型
+- `model.onnx`：ONNX 模型
+- `export_metadata.json`：导出元信息与标签映射
+
+导出前请确保：
+
+- 输入特征维度与训练时一致
+- 序列长度与训练时一致
+- 模型结构与 checkpoint 对应
+
+## 板端部署参考
+
+当前项目的最终落点是开发板或边缘端部署，因此建议优先保留以下链路：
+
+```text
+骨架 txt / 采集模块
+  -> 统一预处理
+  -> GatedFusionTCNBiLSTM
+  -> TorchScript / ONNX 导出
+  -> 板端推理
 ```
+
+建议部署前检查：
+
+- 输入张量 dtype 是否为 `float32`
+- 输入 shape 是否与训练一致
+- 标签映射是否和模型一致
+- 导出后推理结果是否与 PyTorch 版本一致
+
+## 连续手语翻译的参考实现思路
+
+仓库外部已有一套连续识别流程可作为参考。其核心思路不是直接做句子级端到端翻译，而是：
+
+```text
+摄像头采集连续动作
+  -> 感知模块转骨架序列
+  -> 连续动作中抽取关键帧
+  -> 不足则插值补齐
+  -> 固定长度序列输入模型
+  -> 输出单个手语词
+  -> 前端再将多个词串联成句子
+```
+
+这条路线对当前项目非常有参考价值，因为它说明了一个现实可行的方向：
+
+- 先做词级实时识别
+- 再做边界切分
+- 再把词串成句子
+
+### 关键启发
+
+该流程里，连续动作的处理重点包括：
+
+- 对相邻帧做差，选出变化最大的关键帧
+- 用关键帧组成固定长度输入
+- 帧数不足时使用线性插值补齐
+- 模型输出最后一个时间步的分类结果
+- 使用置信度阈值辅助稳定输出
+
+这意味着当前孤立词模型可以作为连续手语翻译的基础模块，后续最可行的扩展路线是：
+
+1. 实时窗口化采集连续骨架
+2. 用边界动作或静止段做切分
+3. 对每段调用现有孤立词模型
+4. 再在前端或语言层做句子拼接
 
 ## 当前阶段说明
 
-当前项目的重点是把孤立词识别这条链路先跑通，而不是连续手语识别。后续如果数据量和标注更加充分，再考虑扩展到：
+当前项目的重点是把孤立词识别这条链路先跑通，并作为后续连续手语翻译的基础。后续如果数据量和标注更加充分，再考虑扩展到：
 
-- 双模态融合（color + depth）
-- 更复杂的融合策略（双分支、门控、注意力）
-- RGB 视频分类
-- 更复杂的时序模型
-- 端侧实时推理
+- 连续手语分割与词级识别
+- 语言模型融合
+- 更复杂的时序解码
+- RGB / depth / skeleton 多模态协同
+- 板端实时推理与部署
+
+## 连续手语翻译下一步计划
+
+当前孤立词模型已经具备较好的基线，下一步建议按以下路线推进连续手语翻译：
+
+### Phase 1：数据与任务定义
+- 确定连续手语数据来源与格式
+- 统一视频、骨架、词级/句级标注方式
+- 设计训练/验证/测试划分
+- 明确是否做词边界标注或直接做句子级翻译
+
+### Phase 2：连续输入建模原型
+- 复用当前骨架特征提取流程
+- 将连续视频切分为滑动窗口序列
+- 用当前 `GatedFusionTCNBiLSTM` 作为窗口级编码器
+- 输出窗口级词候选或中间表示
+
+### Phase 3：序列解码
+- 在窗口级编码器上加入 CTC / Transformer 解码头
+- 支持变长输出
+- 初步完成连续词识别（Continuous Isolated Word Recognition）
+
+### Phase 4：语言层建模
+- 引入词序约束或语言模型
+- 融合上下文信息，减少重复与跳词
+- 提升句子级可读性
+
+### Phase 5：端侧部署
+- 导出 TorchScript / ONNX
+- 验证板端推理性能
+- 优化输入预处理、推理延迟与内存占用
 
 ## 配置说明
 
@@ -212,6 +311,7 @@ python scripts/export_onnx.py
 - `README.md`
 - `scripts/prepare_data.py`
 - `scripts/train.py`
+- `scripts/export_model.py`
 - `src/data/slr_isolated.py`
 - `src/data/dataset.py`
 - `src/models/tcn_bilstm.py`

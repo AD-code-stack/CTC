@@ -110,6 +110,67 @@ class DualBranchTCNBiLSTM(nn.Module):
         return self.classifier(x)
 
 
+class GatedFusionTCNBiLSTM(nn.Module):
+    def __init__(
+        self,
+        input_dim: int,
+        num_classes: int,
+        hidden_size: int = 128,
+        lstm_layers: int = 1,
+        dropout: float = 0.2,
+        tcn_channels: Sequence[int] = (64, 128),
+    ) -> None:
+        super().__init__()
+        if input_dim % 2 != 0:
+            raise ValueError(f'GatedFusionTCNBiLSTM expects even input_dim, got {input_dim}')
+        branch_dim = input_dim // 2
+        self.branch_dim = branch_dim
+        self.color_backbone = _Backbone(branch_dim, tcn_channels, dropout)
+        self.depth_backbone = _Backbone(branch_dim, tcn_channels, dropout)
+        branch_out = self.color_backbone.output_dim
+        self.color_lstm = nn.LSTM(
+            input_size=branch_out,
+            hidden_size=hidden_size,
+            num_layers=lstm_layers,
+            batch_first=True,
+            bidirectional=True,
+            dropout=dropout if lstm_layers > 1 else 0.0,
+        )
+        self.depth_lstm = nn.LSTM(
+            input_size=branch_out,
+            hidden_size=hidden_size,
+            num_layers=lstm_layers,
+            batch_first=True,
+            bidirectional=True,
+            dropout=dropout if lstm_layers > 1 else 0.0,
+        )
+        fused_dim = hidden_size * 2
+        self.gate = nn.Sequential(
+            nn.Linear(fused_dim * 2, fused_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(fused_dim, fused_dim),
+            nn.Sigmoid(),
+        )
+        self.classifier = nn.Sequential(
+            nn.Linear(fused_dim, fused_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(fused_dim, num_classes),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        color_x, depth_x = torch.split(x, self.branch_dim, dim=2)
+        color_x = self.color_backbone(color_x)
+        depth_x = self.depth_backbone(depth_x)
+        color_x, _ = self.color_lstm(color_x)
+        depth_x, _ = self.depth_lstm(depth_x)
+        color_x = color_x[:, -1, :]
+        depth_x = depth_x[:, -1, :]
+        gate = self.gate(torch.cat([color_x, depth_x], dim=1))
+        fused = gate * color_x + (1.0 - gate) * depth_x
+        return self.classifier(fused)
+
+
 class AttentionFusionTCNBiLSTM(nn.Module):
     def __init__(
         self,

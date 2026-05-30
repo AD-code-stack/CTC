@@ -13,7 +13,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from src.data.dataset import IsolatedWordDataset, IsolatedWordSample
-from src.models.tcn_bilstm import DualBranchTCNBiLSTM, TCNBiLSTM
+from src.models.tcn_bilstm import DualBranchTCNBiLSTM, GatedFusionTCNBiLSTM, TCNBiLSTM
 from src.utils.io import load_json, load_yaml, save_json
 
 
@@ -113,7 +113,7 @@ def _run_epoch(model, loader, criterion, device, optimizer=None):
 def main() -> None:
     parser = argparse.ArgumentParser(description='Train isolated-word SLR classifier.')
     parser.add_argument('--config', type=str, default=None, help='Path to YAML config file.')
-    parser.add_argument('--fusion', choices=['auto', 'dual', 'single'], default='auto', help='Model fusion mode.')
+    parser.add_argument('--fusion', choices=['auto', 'dual', 'gated', 'single'], default='auto', help='Model fusion mode.')
     args = parser.parse_args()
 
     base = Path(__file__).resolve().parents[1]
@@ -154,9 +154,19 @@ def main() -> None:
     use_dual_branch = len(modalities) >= 2 and feature_dim % 2 == 0
     fusion_mode = args.fusion
     if fusion_mode == 'auto':
-        fusion_mode = 'dual' if use_dual_branch else 'single'
+        fusion_mode = 'gated' if use_dual_branch else 'single'
 
-    if fusion_mode == 'dual' and use_dual_branch:
+    if fusion_mode == 'gated' and use_dual_branch:
+        print('Using GatedFusionTCNBiLSTM for fused modalities.')
+        model = GatedFusionTCNBiLSTM(
+            input_dim=feature_dim,
+            num_classes=num_classes,
+            hidden_size=int(config['model']['hidden_size']),
+            lstm_layers=int(config['model']['lstm_layers']),
+            dropout=float(config['model']['dropout']),
+            tcn_channels=config['model']['tcn_channels'],
+        ).to(device)
+    elif fusion_mode == 'dual' and use_dual_branch:
         print('Using DualBranchTCNBiLSTM for fused modalities.')
         model = DualBranchTCNBiLSTM(
             input_dim=feature_dim,
