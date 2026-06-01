@@ -13,7 +13,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from src.data.dataset import IsolatedWordDataset, IsolatedWordSample
-from src.models.tcn_bilstm import DualBranchTCNBiLSTM, GatedFusionTCNBiLSTM, TCNBiLSTM
+from src.models.tcn_bilstm import TCNBiLSTM
 from src.utils.io import load_json, load_yaml, save_json
 
 
@@ -113,7 +113,7 @@ def _run_epoch(model, loader, criterion, device, optimizer=None):
 def main() -> None:
     parser = argparse.ArgumentParser(description='Train isolated-word SLR classifier.')
     parser.add_argument('--config', type=str, default=None, help='Path to YAML config file.')
-    parser.add_argument('--fusion', choices=['auto', 'dual', 'gated', 'single'], default='auto', help='Model fusion mode.')
+    parser.add_argument('--input-dim', type=int, default=None, help='Override model input dimension.')
     args = parser.parse_args()
 
     base = Path(__file__).resolve().parents[1]
@@ -142,6 +142,8 @@ def main() -> None:
     label_map = load_json(processed_dir / 'labels' / 'label_map.json')
     num_classes = len(label_map)
     feature_dim = int(summary.get('feature_dim', config['model'].get('input_dim', 50)))
+    if args.input_dim is not None:
+        feature_dim = int(args.input_dim)
     config['model']['input_dim'] = feature_dim
     print(f'Loaded processed dataset modalities: {modalities}')
     print(f'Using input feature dim: {feature_dim}')
@@ -151,40 +153,14 @@ def main() -> None:
     test_loader = DataLoader(IsolatedWordDataset(test_samples), batch_size=int(config['train']['batch_size']), shuffle=False, num_workers=int(config['train']['num_workers']))
 
     device = torch.device(config['train']['device'] if torch.cuda.is_available() else 'cpu')
-    use_dual_branch = len(modalities) >= 2 and feature_dim % 2 == 0
-    fusion_mode = args.fusion
-    if fusion_mode == 'auto':
-        fusion_mode = 'gated' if use_dual_branch else 'single'
-
-    if fusion_mode == 'gated' and use_dual_branch:
-        print('Using GatedFusionTCNBiLSTM for fused modalities.')
-        model = GatedFusionTCNBiLSTM(
-            input_dim=feature_dim,
-            num_classes=num_classes,
-            hidden_size=int(config['model']['hidden_size']),
-            lstm_layers=int(config['model']['lstm_layers']),
-            dropout=float(config['model']['dropout']),
-            tcn_channels=config['model']['tcn_channels'],
-        ).to(device)
-    elif fusion_mode == 'dual' and use_dual_branch:
-        print('Using DualBranchTCNBiLSTM for fused modalities.')
-        model = DualBranchTCNBiLSTM(
-            input_dim=feature_dim,
-            num_classes=num_classes,
-            hidden_size=int(config['model']['hidden_size']),
-            lstm_layers=int(config['model']['lstm_layers']),
-            dropout=float(config['model']['dropout']),
-            tcn_channels=config['model']['tcn_channels'],
-        ).to(device)
-    else:
-        model = TCNBiLSTM(
-            input_dim=feature_dim,
-            num_classes=num_classes,
-            hidden_size=int(config['model']['hidden_size']),
-            lstm_layers=int(config['model']['lstm_layers']),
-            dropout=float(config['model']['dropout']),
-            tcn_channels=config['model']['tcn_channels'],
-        ).to(device)
+    model = TCNBiLSTM(
+        input_dim=feature_dim,
+        num_classes=num_classes,
+        hidden_size=int(config['model']['hidden_size']),
+        lstm_layers=int(config['model']['lstm_layers']),
+        dropout=float(config['model']['dropout']),
+        tcn_channels=config['model']['tcn_channels'],
+    ).to(device)
 
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(config['train']['lr']), weight_decay=float(config['train']['weight_decay']))

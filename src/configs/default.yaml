@@ -4,13 +4,13 @@ project:
   work_dir: experiments
 
 data:
-  raw_dir: data/raw/xf500_body_color_txt
-  depth_raw_dir: data/raw/xf500_body_depth_txt
+  raw_dir: data/raw/isolated_word_hand_upper_txt
+  depth_raw_dir: null
   processed_dir: data/processed
   dictionary_file: data/raw/dictionary.txt
   processed_records: data/processed/isolated_word_manifest.json
   sequence_length: 32
-  feature_dim: 50
+  feature_dim: 144
   train_ratio: 0.8
   val_ratio: 0.1
   test_ratio: 0.1
@@ -23,7 +23,7 @@ model:
   tcn_channels: [64, 128]
   lstm_layers: 1
   dropout: 0.1
-  input_dim: 100
+  input_dim: 50
 
 train:
   batch_size: 32

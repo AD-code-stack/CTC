@@ -23,7 +23,8 @@ class IsolatedWordItem:
 
 
 DEFAULT_SEQUENCE_LENGTH = 32
-DEFAULT_FEATURE_DIM = 50
+DEFAULT_FEATURE_DIM = 128
+DEFAULT_FRAME_FEATURE_DIM = 144
 
 
 def load_dictionary(dictionary_path: str | Path) -> dict[str, str]:
@@ -66,7 +67,7 @@ def load_skeleton_sequence(txt_path: str | Path) -> np.ndarray:
             if values is not None:
                 frames.append(values)
     if not frames:
-        return np.zeros((0, DEFAULT_FEATURE_DIM), dtype=np.float32)
+        return np.zeros((0, DEFAULT_FRAME_FEATURE_DIM), dtype=np.float32)
 
     max_dim = max(len(row) for row in frames)
     arr = np.zeros((len(frames), max_dim), dtype=np.float32)
@@ -196,20 +197,10 @@ def build_isolated_word_dataset(
         used_modalities.append('depth')
 
     for txt_path, label_name in samples:
-        color_seq = load_skeleton_sequence(txt_path)
-        if color_seq.size == 0:
+        seq = load_skeleton_sequence(txt_path)
+        if seq.size == 0:
             continue
-        color_seq = resample_sequence(color_seq, sequence_length)
-        depth_seq = None
-        if depth_root_path and depth_root_path.exists():
-            matched = _find_matching_depth_file(txt_path, raw_root, depth_root_path)
-            if matched is not None:
-                depth_seq = load_skeleton_sequence(matched)
-                if depth_seq.size > 0:
-                    depth_seq = resample_sequence(depth_seq, sequence_length)
-                else:
-                    depth_seq = None
-        seq = _merge_modalities(color_seq, depth_seq)
+        seq = resample_sequence(seq, sequence_length)
         sample_id = txt_path.parent.name + '_' + txt_path.stem
         if sample_id in seen_ids:
             sample_id = f'{sample_id}_{len(seen_ids)}'
@@ -276,7 +267,7 @@ def build_isolated_word_dataset(
             'dictionary_file': str(dictionary_file) if dictionary_file else None,
             'raw_root': str(raw_root),
             'depth_root': str(depth_root_path) if depth_root_path else None,
-            'modalities': used_modalities,
+            'modalities': ['skeleton'],
             'split_ratio': {'train': split_ratio[0], 'val': split_ratio[1], 'test': split_ratio[2]},
             'seed': seed,
         },

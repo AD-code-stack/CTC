@@ -11,13 +11,13 @@
 这是一类标准的**样本级多分类任务**：
 
 ```text
-原始骨架 txt
+输入骨架 txt
   -> 读取字典与样本扫描
   -> 统一序列长度
   -> 保存为 .npy 特征文件
   -> 生成 label map 与 train/val/test manifest
   -> PyTorch Dataset / DataLoader
-  -> GatedFusionTCNBiLSTM
+  -> TCN-BiLSTM 分类器
   -> CrossEntropyLoss
   -> Accuracy / Macro F1 / Top-5 Accuracy
 ```
@@ -28,40 +28,40 @@
 
 本项目当前使用的孤立词数据目录应放在仓库内的 `data/raw/` 下，当前配置默认读取：
 
-- `data/raw/xf500_body_color_txt`：彩色图坐标系下的骨架 txt 序列，作为主输入
-- `data/raw/xf500_body_depth_txt`：深度图坐标系下的骨架 txt 序列，可与 color 配对用于双模态融合
+- `data/raw/isolated_word_hand_upper_txt`：由帧图像提取出的上半身 + 双手骨架 txt 序列，作为主输入
 - `data/raw/dictionary.txt`：类别字典，负责把词语名称和类别编号对应起来
 
-### 骨架数据格式
+### 新数据的来源
 
-解压后，骨架 txt 文件通常表示：
+你目前使用的数据是由逐帧图像提取得到的骨架序列。其提取逻辑是：
 
-- 一个文件对应一个样本
-- 每行对应一帧
-- 每行包含 50 个数值
-- 表示 25 个关节点的 `x/y` 坐标
+- 输入：按样本组织的帧图像文件夹
+- 通过 MediaPipe Holistic 提取：
+  - 上半身关键点（肩、肘、腕）
+  - 左手 21 个关键点
+  - 右手 21 个关键点
+- 每帧输出一行浮点数，保存为 `.txt`
 
-因此，每个样本可整理为一个二维序列：
+该 txt 的每一行是一个帧的骨架特征向量，通常包含：
 
-```text
-[T, 50]
-```
+- 6 个上半身点 × 3 维 = 18 维
+- 左手 21 点 × 3 维 = 63 维
+- 右手 21 点 × 3 维 = 63 维
 
-其中 `T` 为帧数，后续会统一采样或插值到固定长度。
+因此每帧理论上是 `18 + 63 + 63 = 144` 维；但由于不同帧可能存在缺失点或空值，实际读取时会做补零和对齐处理。
 
 ## 推荐的项目流程
 
 ```text
-原始 SLR 孤立词数据
-  -> 解压并放入 data/raw/
-  -> 读取 dictionary.txt
+原始 SLR 孤立词帧图像
+  -> MediaPipe Holistic 提取骨架 txt
   -> 扫描骨架 txt 文件
   -> 随机划分 train/val/test
   -> 统一序列长度
   -> 保存为 .npy 特征文件
   -> 生成 label map、manifest 与 summary
   -> PyTorch Dataset
-  -> GatedFusionTCNBiLSTM / 双分支 TCNBiLSTM
+  -> TCN-BiLSTM
   -> CrossEntropyLoss
   -> Accuracy / Macro F1 / Confusion Matrix
 ```
@@ -87,17 +87,15 @@
 
 ## 训练方法
 
-当前训练支持以下几种模式：
+当前训练支持以下模式：
 
-- `single`：单分支 TCN-BiLSTM
-- `dual`：双分支 color/depth 融合
-- `gated`：门控融合，当前推荐主模型
+- `single`：单分支 TCN-BiLSTM（当前新数据推荐）
 - `auto`：自动根据数据模态选择
 
 推荐优先使用：
 
 - 输入：固定长度骨架序列
-- 模型：`GatedFusionTCNBiLSTM`
+- 模型：`TCNBiLSTM`
 - 输出：整段样本的类别 logits
 - 损失函数：`CrossEntropyLoss`
 - 指标：`Top-1 Accuracy`、`Macro F1`、`Top-5 Accuracy`
@@ -128,13 +126,9 @@ pip install -r requirements.txt
 python scripts/prepare_data.py
 ```
 
-如果 `depth` 目录已经准备好，也可以显式指定：
+如需指定别的数据源，可以通过配置文件修改 `data.raw_dir`。
 
-```bash
-python scripts/prepare_data.py --depth-dir data/raw/xf500_body_depth_txt
-```
-
-该步骤会扫描原始孤立词数据，提取骨架序列并生成可训练的特征文件与清单。
+该步骤会扫描帧图像或骨架文本，生成可训练的特征文件与清单。
 
 准备完成后脚本会自动做校验，包括：
 
@@ -148,7 +142,7 @@ python scripts/prepare_data.py --depth-dir data/raw/xf500_body_depth_txt
 如果你想在服务器上后台运行训练，推荐使用：
 
 ```bash
-nohup python -u scripts/train.py --fusion gated > train.log 2>&1 &
+nohup python -u scripts/train.py > train.log 2>&1 &
 ```
 
 训练日志会写入 `train.log`，可以通过下面命令查看进度：
@@ -178,9 +172,9 @@ python scripts/grid_search.py \
 ```bash
 python scripts/export_model.py \
   --checkpoint experiments/isolated_word/best_model.pt \
-  --fusion gated \
+  --fusion single \
   --format both \
-  --output-dir exports/gated_best
+  --output-dir exports/single_best
 ```
 
 导出结果包括：
@@ -195,61 +189,12 @@ python scripts/export_model.py \
 - 序列长度与训练时一致
 - 模型结构与 checkpoint 对应
 
-## 板端部署参考
+### 6. 评估与推理
 
-当前项目的最终落点是开发板或边缘端部署，因此建议优先保留以下链路：
-
-```text
-骨架 txt / 采集模块
-  -> 统一预处理
-  -> GatedFusionTCNBiLSTM
-  -> TorchScript / ONNX 导出
-  -> 板端推理
+```bash
+python scripts/eval.py
+python scripts/infer.py --input path/to/sample.txt
 ```
-
-建议部署前检查：
-
-- 输入张量 dtype 是否为 `float32`
-- 输入 shape 是否与训练一致
-- 标签映射是否和模型一致
-- 导出后推理结果是否与 PyTorch 版本一致
-
-## 连续手语翻译的参考实现思路
-
-仓库外部已有一套连续识别流程可作为参考。其核心思路不是直接做句子级端到端翻译，而是：
-
-```text
-摄像头采集连续动作
-  -> 感知模块转骨架序列
-  -> 连续动作中抽取关键帧
-  -> 不足则插值补齐
-  -> 固定长度序列输入模型
-  -> 输出单个手语词
-  -> 前端再将多个词串联成句子
-```
-
-这条路线对当前项目非常有参考价值，因为它说明了一个现实可行的方向：
-
-- 先做词级实时识别
-- 再做边界切分
-- 再把词串成句子
-
-### 关键启发
-
-该流程里，连续动作的处理重点包括：
-
-- 对相邻帧做差，选出变化最大的关键帧
-- 用关键帧组成固定长度输入
-- 帧数不足时使用线性插值补齐
-- 模型输出最后一个时间步的分类结果
-- 使用置信度阈值辅助稳定输出
-
-这意味着当前孤立词模型可以作为连续手语翻译的基础模块，后续最可行的扩展路线是：
-
-1. 实时窗口化采集连续骨架
-2. 用边界动作或静止段做切分
-3. 对每段调用现有孤立词模型
-4. 再在前端或语言层做句子拼接
 
 ## 当前阶段说明
 
@@ -258,7 +203,7 @@ python scripts/export_model.py \
 - 连续手语分割与词级识别
 - 语言模型融合
 - 更复杂的时序解码
-- RGB / depth / skeleton 多模态协同
+- 更复杂的时序模型
 - 板端实时推理与部署
 
 ## 连续手语翻译下一步计划
@@ -274,7 +219,7 @@ python scripts/export_model.py \
 ### Phase 2：连续输入建模原型
 - 复用当前骨架特征提取流程
 - 将连续视频切分为滑动窗口序列
-- 用当前 `GatedFusionTCNBiLSTM` 作为窗口级编码器
+- 用当前 `TCNBiLSTM` 作为窗口级编码器
 - 输出窗口级词候选或中间表示
 
 ### Phase 3：序列解码
@@ -313,8 +258,6 @@ python scripts/export_model.py \
 - `scripts/train.py`
 - `scripts/export_model.py`
 - `src/data/slr_isolated.py`
-- `src/data/dataset.py`
-- `src/models/tcn_bilstm.py`
 - `src/configs/default.yaml`
 
 后续如果你要继续扩展，我可以再帮你补上：
