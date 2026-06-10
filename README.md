@@ -31,6 +31,16 @@
 - `data/raw/isolated_word_hand_upper_txt`：由帧图像提取出的上半身 + 双手骨架 txt 序列，作为主输入
 - `data/raw/dictionary.txt`：类别字典，负责把词语名称和类别编号对应起来
 
+### 当前数据组织方式
+
+这批数据按类别目录组织，目录名就是词典里的原始编号，例如：
+
+- `data/raw/isolated_word_hand_upper_txt/000`
+- `data/raw/isolated_word_hand_upper_txt/001`
+- `data/raw/isolated_word_hand_upper_txt/002`
+
+也就是说，原始目录编号、词典编号和最终训练标签会尽量保持一致，避免推理时发生标签错位。
+
 ### 新数据的来源
 
 你目前使用的数据是由逐帧图像提取得到的骨架序列。其提取逻辑是：
@@ -42,7 +52,7 @@
   - 右手 21 个关键点
 - 每帧输出一行浮点数，保存为 `.txt`
 
-该 txt 的每一行是一个帧的骨架特征向量，通常包含：
+每帧的理论特征维度是：
 
 - 6 个上半身点 × 3 维 = 18 维
 - 左手 21 点 × 3 维 = 63 维
@@ -163,7 +173,7 @@ python scripts/grid_search.py \
   --grid train.batch_size=32
 ```
 
-默认会把每次实验结果保存到 `experiments/grid_search/`。
+如果你已经切换到新的数据集版本，建议重新生成 `data/processed/`，避免旧实验产物干扰当前结果。默认会把每次实验结果保存到 `experiments/grid_search/`。
 
 ### 5. 导出模型
 

@@ -121,9 +121,11 @@ def _parse_class_dir_mapping(class_dirs: list[Path], dictionary: dict[str, str])
     return mapping
 
 
-def _discover_samples(raw_root: Path, dictionary: dict[str, str]) -> list[tuple[Path, str]]:
+def _discover_samples(raw_root: Path, dictionary: dict[str, str], max_class: int | None = None) -> list[tuple[Path, str]]:
     samples: list[tuple[Path, str]] = []
     class_dirs = sorted([p for p in raw_root.iterdir() if p.is_dir()])
+    if max_class is not None:
+        class_dirs = [p for p in class_dirs if p.name.isdigit() and int(p.name) <= max_class]
     if class_dirs:
         class_dir_to_label = _parse_class_dir_mapping(class_dirs, dictionary)
         for class_dir in class_dirs:
@@ -173,6 +175,7 @@ def build_isolated_word_dataset(
     split_ratio: tuple[float, float, float] = (0.8, 0.1, 0.1),
     seed: int = 42,
     depth_root: str | Path | None = None,
+    max_class: int | None = None,
 ) -> list[IsolatedWordItem]:
     raw_root = Path(raw_root)
     processed_root = Path(processed_root)
@@ -187,7 +190,7 @@ def build_isolated_word_dataset(
     stats_root.mkdir(parents=True, exist_ok=True)
 
     dictionary = load_dictionary(dictionary_file) if dictionary_file else {}
-    samples = _discover_samples(raw_root, dictionary)
+    samples = _discover_samples(raw_root, dictionary, max_class=max_class)
 
     items: list[IsolatedWordItem] = []
     label_names: list[str] = []
@@ -221,7 +224,11 @@ def build_isolated_word_dataset(
         )
         np.save(feature_root / f'{sample_id}.npy', seq)
 
-    unique_labels = sorted(set(label_names))
+    if dictionary:
+        ordered_labels = [label for label in dictionary.values() if label in set(label_names)]
+        unique_labels = ordered_labels + [label for label in sorted(set(label_names)) if label not in ordered_labels]
+    else:
+        unique_labels = sorted(set(label_names))
     label_map = {name: i for i, name in enumerate(unique_labels)}
     for item in items:
         item.label_id = label_map[item.label_name]

@@ -68,6 +68,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description='Prepare isolated-word SLR processed data.')
     parser.add_argument('--config', type=str, default=None, help='Path to YAML config file.')
     parser.add_argument('--depth-dir', type=str, default=None, help='Optional depth raw directory path.')
+    parser.add_argument('--max-class', type=int, default=None, help='Only keep classes with numeric directory name <= max-class.')
     args = parser.parse_args()
 
     base = Path(__file__).resolve().parents[1]
@@ -88,6 +89,13 @@ def main() -> None:
     if not dictionary_file.exists():
         raise FileNotFoundError(f'Dictionary file not found: {dictionary_file}')
 
+    if args.max_class is not None:
+        class_dir = raw_dir / f'{int(args.max_class):03d}'
+        if class_dir.exists():
+            print(f'Limiting dataset to classes <= {int(args.max_class):03d}')
+        else:
+            print(f'Warning: class directory not found for max-class={args.max_class}, using raw_dir as-is.')
+
     items = build_isolated_word_dataset(
         raw_root=raw_dir,
         processed_root=processed_dir,
@@ -96,6 +104,7 @@ def main() -> None:
         split_ratio=(float(config['data']['train_ratio']), float(config['data']['val_ratio']), float(config['data']['test_ratio'])),
         seed=int(config['project'].get('seed', 42)),
         depth_root=depth_dir,
+        max_class=args.max_class,
     )
 
     print(f'Loaded {len(items)} isolated-word records.')
