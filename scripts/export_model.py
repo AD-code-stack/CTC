@@ -5,7 +5,7 @@ from pathlib import Path
 
 import torch
 
-from src.models.tcn_bilstm import DualBranchTCNBiLSTM, GatedFusionTCNBiLSTM, TCNBiLSTM
+from src.models.tcn_bilstm import TCNBiLSTM
 from src.utils.io import load_json, load_yaml, save_json
 
 
@@ -22,24 +22,6 @@ def _build_model(config: dict, num_classes: int, fusion: str) -> torch.nn.Module
     dropout = float(model_cfg['dropout'])
     tcn_channels = model_cfg['tcn_channels']
 
-    if fusion == 'gated':
-        return GatedFusionTCNBiLSTM(
-            input_dim=feature_dim,
-            num_classes=num_classes,
-            hidden_size=hidden_size,
-            lstm_layers=lstm_layers,
-            dropout=dropout,
-            tcn_channels=tcn_channels,
-        )
-    if fusion == 'dual':
-        return DualBranchTCNBiLSTM(
-            input_dim=feature_dim,
-            num_classes=num_classes,
-            hidden_size=hidden_size,
-            lstm_layers=lstm_layers,
-            dropout=dropout,
-            tcn_channels=tcn_channels,
-        )
     return TCNBiLSTM(
         input_dim=feature_dim,
         num_classes=num_classes,
@@ -80,7 +62,7 @@ def main() -> None:
     parser.add_argument('--config', type=str, default=None, help='Path to YAML config file.')
     parser.add_argument('--checkpoint', type=str, default=None, required=True, help='Path to best_model.pt or last_model.pt.')
     parser.add_argument('--output-dir', type=str, default='exports', help='Directory to store exported artifacts.')
-    parser.add_argument('--fusion', choices=['single', 'dual', 'gated'], default='gated', help='Model fusion type to export.')
+    parser.add_argument('--fusion', choices=['single'], default='single', help='Model fusion type to export.')
     parser.add_argument('--format', choices=['torchscript', 'onnx', 'both'], default='both', help='Export format.')
     parser.add_argument('--device', type=str, default='cpu', help='Export device.')
     args = parser.parse_args()
@@ -119,6 +101,8 @@ def main() -> None:
         'sequence_length': int(config['data'].get('sequence_length', 32)),
         'num_classes': num_classes,
         'labels': label_map,
+        'raw_dir': str(config['data']['raw_dir']),
+        'processed_dir': str(config['data']['processed_dir']),
     }
     save_json(output_dir / 'export_metadata.json', metadata)
 
@@ -126,6 +110,12 @@ def main() -> None:
         export_torchscript(model, example_input, output_dir / 'model_ts.pt')
     if args.format in {'onnx', 'both'}:
         export_onnx(model, example_input, output_dir / 'model.onnx')
+
+    config_copy = dict(config)
+    config_copy['model'] = dict(config['model'])
+    config_copy['model']['input_dim'] = feature_dim
+    config_copy['model']['num_classes'] = num_classes
+    save_json(output_dir / 'export_config.json', config_copy)
 
     print(f'Export completed. Files saved to: {output_dir}')
 
