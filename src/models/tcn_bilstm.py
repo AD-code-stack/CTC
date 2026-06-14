@@ -39,20 +39,18 @@ class TCNBiLSTM(nn.Module):
     ) -> None:
         super().__init__()
         self.backbone = _Backbone(input_dim, tcn_channels, dropout)
-        self.lstm = nn.LSTM(
-            input_size=self.backbone.output_dim,
-            hidden_size=hidden_size,
-            num_layers=lstm_layers,
-            batch_first=True,
-            bidirectional=True,
-            dropout=dropout if lstm_layers > 1 else 0.0,
+        self.pool = nn.AdaptiveAvgPool1d(1)
+        self.classifier = nn.Sequential(
+            nn.Linear(self.backbone.output_dim, hidden_size),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size, num_classes),
         )
-        self.classifier = nn.Linear(hidden_size * 2, num_classes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.backbone(x)
-        x, _ = self.lstm(x)
-        x = x[:, -1, :]
+        x = x.transpose(1, 2)
+        x = self.pool(x).squeeze(-1)
         return self.classifier(x)
 
 
@@ -74,37 +72,21 @@ class DualBranchTCNBiLSTM(nn.Module):
         self.color_backbone = _Backbone(branch_dim, tcn_channels, dropout)
         self.depth_backbone = _Backbone(branch_dim, tcn_channels, dropout)
         branch_out = self.color_backbone.output_dim
-        self.color_lstm = nn.LSTM(
-            input_size=branch_out,
-            hidden_size=hidden_size,
-            num_layers=lstm_layers,
-            batch_first=True,
-            bidirectional=True,
-            dropout=dropout if lstm_layers > 1 else 0.0,
-        )
-        self.depth_lstm = nn.LSTM(
-            input_size=branch_out,
-            hidden_size=hidden_size,
-            num_layers=lstm_layers,
-            batch_first=True,
-            bidirectional=True,
-            dropout=dropout if lstm_layers > 1 else 0.0,
-        )
+        self.color_pool = nn.AdaptiveAvgPool1d(1)
+        self.depth_pool = nn.AdaptiveAvgPool1d(1)
         self.fusion = nn.Sequential(
-            nn.Linear(hidden_size * 4, hidden_size * 2),
+            nn.Linear(branch_out * 2, hidden_size),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
         )
-        self.classifier = nn.Linear(hidden_size * 2, num_classes)
+        self.classifier = nn.Linear(hidden_size, num_classes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         color_x, depth_x = torch.split(x, self.branch_dim, dim=2)
-        color_x = self.color_backbone(color_x)
-        depth_x = self.depth_backbone(depth_x)
-        color_x, _ = self.color_lstm(color_x)
-        depth_x, _ = self.depth_lstm(depth_x)
-        color_x = color_x[:, -1, :]
-        depth_x = depth_x[:, -1, :]
+        color_x = self.color_backbone(color_x).transpose(1, 2)
+        depth_x = self.depth_backbone(depth_x).transpose(1, 2)
+        color_x = self.color_pool(color_x).squeeze(-1)
+        depth_x = self.depth_pool(depth_x).squeeze(-1)
         x = torch.cat([color_x, depth_x], dim=1)
         x = self.fusion(x)
         return self.classifier(x)
@@ -128,44 +110,26 @@ class GatedFusionTCNBiLSTM(nn.Module):
         self.color_backbone = _Backbone(branch_dim, tcn_channels, dropout)
         self.depth_backbone = _Backbone(branch_dim, tcn_channels, dropout)
         branch_out = self.color_backbone.output_dim
-        self.color_lstm = nn.LSTM(
-            input_size=branch_out,
-            hidden_size=hidden_size,
-            num_layers=lstm_layers,
-            batch_first=True,
-            bidirectional=True,
-            dropout=dropout if lstm_layers > 1 else 0.0,
-        )
-        self.depth_lstm = nn.LSTM(
-            input_size=branch_out,
-            hidden_size=hidden_size,
-            num_layers=lstm_layers,
-            batch_first=True,
-            bidirectional=True,
-            dropout=dropout if lstm_layers > 1 else 0.0,
-        )
-        fused_dim = hidden_size * 2
+        self.color_pool = nn.AdaptiveAvgPool1d(1)
+        self.depth_pool = nn.AdaptiveAvgPool1d(1)
+        fused_dim = branch_out
         self.gate = nn.Sequential(
-            nn.Linear(fused_dim * 2, fused_dim),
+            nn.Linear(branch_out * 2, fused_dim),
             nn.ReLU(inplace=True),
             nn.Linear(fused_dim, fused_dim),
             nn.Sigmoid(),
         )
         self.classifier = nn.Sequential(
-            nn.Linear(fused_dim, fused_dim),
+            nn.Linear(fused_dim, hidden_size),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
-            nn.Linear(fused_dim, num_classes),
+            nn.Linear(hidden_size, num_classes),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         color_x, depth_x = torch.split(x, self.branch_dim, dim=2)
-        color_x = self.color_backbone(color_x)
-        depth_x = self.depth_backbone(depth_x)
-        color_x, _ = self.color_lstm(color_x)
-        depth_x, _ = self.depth_lstm(depth_x)
-        color_x = color_x[:, -1, :]
-        depth_x = depth_x[:, -1, :]
+        color_x = self.color_pool(self.color_backbone(color_x).transpose(1, 2)).squeeze(-1)
+        depth_x = self.depth_pool(self.depth_backbone(depth_x).transpose(1, 2)).squeeze(-1)
         gate = self.gate(torch.cat([color_x, depth_x], dim=1))
         fused = gate * color_x + (1.0 - gate) * depth_x
         return self.classifier(fused)
@@ -189,42 +153,24 @@ class AttentionFusionTCNBiLSTM(nn.Module):
         self.color_backbone = _Backbone(branch_dim, tcn_channels, dropout)
         self.depth_backbone = _Backbone(branch_dim, tcn_channels, dropout)
         branch_out = self.color_backbone.output_dim
-        self.color_lstm = nn.LSTM(
-            input_size=branch_out,
-            hidden_size=hidden_size,
-            num_layers=lstm_layers,
-            batch_first=True,
-            bidirectional=True,
-            dropout=dropout if lstm_layers > 1 else 0.0,
-        )
-        self.depth_lstm = nn.LSTM(
-            input_size=branch_out,
-            hidden_size=hidden_size,
-            num_layers=lstm_layers,
-            batch_first=True,
-            bidirectional=True,
-            dropout=dropout if lstm_layers > 1 else 0.0,
-        )
+        self.color_pool = nn.AdaptiveAvgPool1d(1)
+        self.depth_pool = nn.AdaptiveAvgPool1d(1)
         self.attention = nn.Sequential(
-            nn.Linear(hidden_size * 4, hidden_size * 2),
+            nn.Linear(branch_out * 2, branch_out),
             nn.Tanh(),
-            nn.Linear(hidden_size * 2, 2),
+            nn.Linear(branch_out, 2),
         )
         self.classifier = nn.Sequential(
-            nn.Linear(hidden_size * 2, hidden_size * 2),
+            nn.Linear(branch_out, hidden_size),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
-            nn.Linear(hidden_size * 2, num_classes),
+            nn.Linear(hidden_size, num_classes),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         color_x, depth_x = torch.split(x, self.branch_dim, dim=2)
-        color_x = self.color_backbone(color_x)
-        depth_x = self.depth_backbone(depth_x)
-        color_x, _ = self.color_lstm(color_x)
-        depth_x, _ = self.depth_lstm(depth_x)
-        color_x = color_x[:, -1, :]
-        depth_x = depth_x[:, -1, :]
+        color_x = self.color_pool(self.color_backbone(color_x).transpose(1, 2)).squeeze(-1)
+        depth_x = self.depth_pool(self.depth_backbone(depth_x).transpose(1, 2)).squeeze(-1)
         fused = torch.cat([color_x, depth_x], dim=1)
         attn_logits = self.attention(fused)
         attn_weights = torch.softmax(attn_logits, dim=1)
